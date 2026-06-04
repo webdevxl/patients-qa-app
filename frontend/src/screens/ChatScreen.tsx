@@ -21,47 +21,39 @@ interface ChatScreenProps {
   onSwitchCohort: () => void;
 }
 
-// Starter prompts seeded with real patients from each cohort (names + a by-ID example),
-// so a tap returns a grounded answer immediately. `label` is what the chip shows; `text`
-// is what lands in the composer (the full UUID expands there for the by-ID prompt).
-const SUGGESTIONS: Record<CohortGroup, { label: string; text: string }[]> = {
-  A: [
-    {
-      label: 'List the drug allergies for Erna Shearer',
-      text: 'List the drug allergies for Erna Shearer',
-    },
-    {
-      label: 'Summarize the active conditions for Mitchell Vanhoose',
-      text: 'Summarize the active conditions for Mitchell Vanhoose',
-    },
-    {
-      label: 'Most recent pain-level observation for Leda Kilgore',
-      text: 'Most recent pain-level observation for Leda Kilgore',
-    },
-    {
-      label: 'Medications for patient c5db2a36… (by ID)',
-      text: 'What medications is patient c5db2a36-788b-45e7-9401-829cbefc50b1 taking?',
-    },
-  ],
-  B: [
-    {
-      label: 'List the drug allergies for Klara Allison',
-      text: 'List the drug allergies for Klara Allison',
-    },
-    {
-      label: 'Summarize the active conditions for Chase Behrens',
-      text: 'Summarize the active conditions for Chase Behrens',
-    },
-    {
-      label: 'Most recent pain-level observation for Princess Betancourt',
-      text: 'Most recent pain-level observation for Princess Betancourt',
-    },
-    {
-      label: 'Medications for patient 11b5bbb1… (by ID)',
-      text: 'What medications is patient 11b5bbb1-2c43-4925-b646-d73e1bf468d2 taking?',
-    },
-  ],
-};
+// Four starter prompts — one per patient-lookup path — each seeded with real values from the
+// seeded DB. `label` is what the chip shows and ends with the expected patient in [brackets]
+// as a built-in test oracle ("tapping this should resolve to THIS patient"). `text` is the
+// clean question sent to the backend — it never carries the bracketed answer.
+//
+// Heads-up: the backend `find_patient` tool resolves only by name or UUID today, so prompts 3 & 4
+// (by ICD-10 condition code / by medicine name) currently return the safe fallback — the bracketed
+// name documents the patient they SHOULD resolve to once that lookup is added.
+//
+// Cohort-agnostic: isolation is currently off (the agent searches every patient), so the same
+// four prompts are shown for whichever group is selected and resolve regardless of A/B.
+const SUGGESTIONS: { label: string; text: string }[] = [
+  {
+    // 1) By full name
+    label: 'Find the patient named Erna Shearer  [Erna Shearer]',
+    text: 'Find the patient named Erna Shearer',
+  },
+  {
+    // 2) By patient UUID
+    label: 'Find the patient with ID 9f81c036…  [Buffy Alonzo]',
+    text: 'Find the patient with ID 9f81c036-a344-4626-a59c-30a8014b9bc2',
+  },
+  {
+    // 3) By ICD-10 condition code (A52.8 = late latent syphilis)
+    label: 'Find the patient with condition A52.8  [Maybelle Nicholson]',
+    text: 'Find the patient with condition A52.8',
+  },
+  {
+    // 4) By medicine name
+    label: 'Find the patient taking Carvedilol  [Jarrod Whitley]',
+    text: 'Find the patient taking Carvedilol',
+  },
+];
 
 let messageSeq = 0;
 const nextId = () => `m${messageSeq++}`;
@@ -239,7 +231,7 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
               TRY ASKING
             </Text>
             <XStack flexWrap="wrap" gap={8}>
-              {SUGGESTIONS[group].map((s) => (
+              {SUGGESTIONS.map((s) => (
                 <XStack
                   key={s.label}
                   onPress={() => setDraft(s.text)}
