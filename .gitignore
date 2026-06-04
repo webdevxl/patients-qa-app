@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+*.env
+!.env.example
+
+# Build output
+dist/
+build/
+
+# Expo
+.expo/
+.expo-shared/
+web-build/
+
+# Prisma generated client
+backend/node_modules/.prisma/
+backend/src/generated/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+task/

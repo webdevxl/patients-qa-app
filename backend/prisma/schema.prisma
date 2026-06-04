@@ -1,0 +1,129 @@
+// Prisma schema for the Patient Q&A sandbox.
+// Models map 1:1 to the provided CSV tables. Field names are camelCase and
+// mapped to the original snake_case columns via @map / @@map.
+//
+// Cohort isolation: only `Patient` carries the `group` column (A/B). Child
+// records inherit cohort through `patientId` -> Patient.group. `group` and the
+// `patientId` foreign keys are indexed so cohort-scoped lookups stay cheap.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Patient {
+  id                   String    @id
+  nameFirst            String?   @map("name_first")
+  nameLast             String?   @map("name_last")
+  dob                  DateTime? @db.Date
+  gender               String?
+  ethnicityDescription String?   @map("ethnicity_description")
+  legalMailingAddress  Json?     @map("legal_mailing_address")
+  unitDescription      String?   @map("unit_description")
+  floorDescription     String?   @map("floor_description")
+  roomDescription      String?   @map("room_description")
+  bedDescription       String?   @map("bed_description")
+  status               String?
+  admissionTime        DateTime? @map("admission_time") @db.Timestamptz
+  dischargeTime        DateTime? @map("discharge_time") @db.Timestamptz
+  deathTime            DateTime? @map("death_time") @db.Timestamptz
+  email                String?
+  phone                String?
+  outpatient           Boolean?
+  revBy                String?   @map("rev_by")
+  revTime              DateTime? @map("rev_time") @db.Timestamptz
+  onLeave              Boolean?  @map("on_leave")
+  group                String
+
+  allergies    PatientAllergy[]
+  conditions   PatientCondition[]
+  medications  PatientMedication[]
+  observations PatientObservation[]
+
+  @@index([group])
+  @@map("patient")
+}
+
+model PatientAllergy {
+  id              String    @id
+  patientId       String    @map("patient_id")
+  allergen        String?
+  category        String?
+  clinicalStatus  String?   @map("clinical_status")
+  createdBy       String?   @map("created_by")
+  createdTime     DateTime? @map("created_time") @db.Timestamptz
+  onsetDate       DateTime? @map("onset_date") @db.Date
+  reactionNote    String?   @map("reaction_note")
+  reactionType    String?   @map("reaction_type")
+  reactionSubType String?   @map("reaction_sub_type")
+  resolvedDate    DateTime? @map("resolved_date") @db.Date
+  revBy           String?   @map("rev_by")
+  revTime         DateTime? @map("rev_time") @db.Timestamptz
+  severity        String?
+  type            String?
+
+  patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@map("patient_allergy")
+}
+
+model PatientCondition {
+  id                 String    @id
+  patientId          String    @map("patient_id")
+  clinicalStatus     String?   @map("clinical_status")
+  createdBy          String?   @map("created_by")
+  createdTime        DateTime? @map("created_time") @db.Timestamptz
+  icd10Code          String?   @map("icd_10_code")
+  icd10Description   String?   @map("icd_10_description")
+  onsetDate          DateTime? @map("onset_date") @db.Date
+  isPrimaryDiagnosis Boolean?  @map("is_primary_diagnosis")
+  resolvedDate       DateTime? @map("resolved_date") @db.Date
+  revBy              String?   @map("rev_by")
+  revTime            DateTime? @map("rev_time") @db.Timestamptz
+
+  patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@map("patient_condition")
+}
+
+model PatientMedication {
+  id           String    @id
+  patientId    String    @map("patient_id")
+  createdTime  DateTime? @map("created_time") @db.Timestamptz
+  description  String?
+  directions   String?
+  genericName  String?   @map("generic_name")
+  narcotic     Boolean?
+  orderTime    DateTime? @map("order_time") @db.Timestamptz
+  revTime      DateTime? @map("rev_time") @db.Timestamptz
+  rxNormId     String?   @map("rx_norm_id")
+  startTime    DateTime? @map("start_time") @db.Date
+  status       String?
+  strength     String?
+  strengthUnit String?   @map("strength_unit")
+
+  patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@map("patient_medication")
+}
+
+model PatientObservation {
+  id           String    @id
+  patientId    String    @map("patient_id")
+  method       String?
+  recordedBy   String?   @map("recorded_by")
+  recordedTime DateTime? @map("recorded_time") @db.Timestamptz
+  data         Json?
+
+  patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@map("patient_observation")
+}
