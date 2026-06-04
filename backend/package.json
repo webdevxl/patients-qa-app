@@ -8,6 +8,7 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
+    "studio": "langgraphjs dev",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",
@@ -29,6 +30,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@langchain/langgraph-cli": "^1.2.4",
     "@nestjs/cli": "^11.0.0",
     "@nestjs/schematics": "^11.0.0",
     "@types/express": "^5.0.0",

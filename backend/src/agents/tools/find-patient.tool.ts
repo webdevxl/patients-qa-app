@@ -1,6 +1,6 @@
 import { tool } from 'langchain';
 import { z } from 'zod';
-import { PrismaService } from '../../prisma/prisma.service';
+import type { PrismaService } from '../../prisma/prisma.service';
 
 /**
  * Input schema: resolve a patient by ID and/or name — both optional. The LLM extracts

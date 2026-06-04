@@ -1,6 +1,6 @@
 import { createAgent } from 'langchain';
 import { ChatOpenAI } from '@langchain/openai';
-import { PrismaService } from '../prisma/prisma.service';
+import type { PrismaService } from '../prisma/prisma.service';
 import { createFindPatientTool } from './tools/find-patient.tool';
 import { createTracingMiddleware } from './middleware/tracing.middleware';
 
