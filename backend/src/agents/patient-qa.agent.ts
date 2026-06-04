@@ -2,6 +2,7 @@ import { createAgent } from 'langchain';
 import { ChatOpenAI } from '@langchain/openai';
 import { PrismaService } from '../prisma/prisma.service';
 import { createFindPatientTool } from './tools/find-patient.tool';
+import { createTracingMiddleware } from './middleware/tracing.middleware';
 
 /**
  * Phase 1 system prompt: extract a patient ID and/or name from the question, call the
@@ -34,5 +35,10 @@ export function createPatientQaAgent(prisma: PrismaService) {
   const model = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0 }); // reads OPENAI_API_KEY
   const tools = [createFindPatientTool(prisma)];
 
-  return createAgent({ model, tools, systemPrompt: SYSTEM_PROMPT });
+  // Tracing middleware taps every lifecycle hook (beforeAgent → beforeModel →
+  // wrapModelCall/wrapToolCall → afterModel → afterAgent) to log each step of the loop and
+  // the exact request sent to the LLM. It's the seam for customizing the model input too.
+  const middleware = [createTracingMiddleware()];
+
+  return createAgent({ model, tools, systemPrompt: SYSTEM_PROMPT, middleware });
 }
