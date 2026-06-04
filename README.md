@@ -92,10 +92,26 @@ You can also browse the data with `npx prisma studio`.
 ```bash
 cd frontend
 npm install
-npm start                       # press w for web, or scan the QR with Expo Go
+npm start                       # starts the Metro dev server (port 8081)
 ```
 
+Then choose how to open the app from the Expo CLI prompt:
+
+| Key / command | Opens in | Requires |
+|---------------|----------|----------|
+| press `w` (or `npm run web`) | Browser, via `react-native-web` | — (web deps included) |
+| press `i` | iOS Simulator | Xcode |
+| press `a` | Android emulator | Android Studio / an emulator |
+| scan the QR code | Your phone | the **Expo Go** app |
+
 The app currently renders a placeholder screen confirming it builds.
+
+> **Heads-up:** opening `http://localhost:8081` directly in a browser shows a
+> JSON **manifest**, not the app — that's the Metro dev server's endpoint for
+> native clients, and is expected. Let Expo open the browser tab for you (or
+> press `w`); web mode then serves the actual rendered app on the same port.
+> Note that web mode renders the UI full-window via `react-native-web` — it is
+> **not** a phone-frame emulator. For a device frame, use `i` / `a` / Expo Go.
 
 ## Useful scripts (backend)
 
