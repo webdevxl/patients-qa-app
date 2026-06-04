@@ -10,7 +10,8 @@ import { Screen } from '../components/Screen';
 import { Chip } from '../components/Chip';
 import { Composer } from '../components/Composer';
 import { MessageBubble, type ChatMessage } from '../components/MessageBubble';
-import { postQaQuery, ApiError } from '../api/client';
+import { PatientCard } from '../components/PatientCard';
+import { postQaQuery, ApiError, type PatientDetail } from '../api/client';
 import { cohortMeta } from '../domain/cohorts';
 import { cohortTheme, palette } from '../theme/palette';
 import type { CohortGroup } from '../theme/palette';
@@ -65,6 +66,16 @@ const SUGGESTIONS: Record<CohortGroup, { label: string; text: string }[]> = {
 let messageSeq = 0;
 const nextId = () => `m${messageSeq++}`;
 
+// Lead-in line shown above the patient card(s).
+function introText(patients: PatientDetail[]): string {
+  if (patients.length === 1) {
+    const p = patients[0];
+    const name = `${p.nameFirst ?? ''} ${p.nameLast ?? ''}`.trim() || 'this patient';
+    return `Here's the full record for ${name}.`;
+  }
+  return `Found ${patients.length} matching patients — showing each record below. Refine by full name or patient ID to narrow it down.`;
+}
+
 export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
   const meta = cohortMeta(group);
   const accent = cohortTheme[group].accent;
@@ -94,11 +105,22 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
 
     try {
       const result = await postQaQuery({ group, question });
-      const answerMsg: ChatMessage = {
-        id: nextId(),
-        role: 'assistant',
-        text: result.answer,
-      };
+      const answerMsg: ChatMessage =
+        result.patients.length > 0
+          ? {
+              id: nextId(),
+              role: 'assistant',
+              text: introText(result.patients),
+              patients: result.patients,
+            }
+          : {
+              id: nextId(),
+              role: 'assistant',
+              text:
+                result.fallback ??
+                'I cannot find a matching patient in your cohort, or I cannot answer this question based on the available records.',
+              pending: true,
+            };
       setMessages((prev) => [...prev, answerMsg]);
     } catch (e) {
       const text =
@@ -189,7 +211,12 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
           }
         >
           {messages.map((m) => (
-            <MessageBubble key={m.id} message={m} accent={accent} />
+            <React.Fragment key={m.id}>
+              <MessageBubble message={m} accent={accent} />
+              {m.patients?.map((p) => (
+                <PatientCard key={p.id} patient={p} accent={accent} />
+              ))}
+            </React.Fragment>
           ))}
           {pending ? (
             <MessageBubble

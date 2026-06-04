@@ -24,42 +24,96 @@ export const findPatientToolSchema = z.object({
 
 export type FindPatientToolInput = z.infer<typeof findPatientToolSchema>;
 
-/** Full detail returned for a single matched patient. */
+// ── Per-record detail types. These mirror the Prisma models 1:1 (minus the internal
+//    surrogate `id`/`patientId` join keys) so the client receives the FULL record set:
+//    demographics + every condition, medication, allergy and observation. Dates are
+//    pre-formatted to strings (date-only for `@db.Date`, ISO for timestamps) so the
+//    payload is plain JSON the UI can render without re-parsing Date objects. ──
+
+export interface ConditionDetail {
+  clinicalStatus: string | null;
+  icd10Code: string | null;
+  icd10Description: string | null;
+  isPrimaryDiagnosis: boolean | null;
+  onsetDate: string | null;
+  resolvedDate: string | null;
+  createdBy: string | null;
+  createdTime: string | null;
+  revBy: string | null;
+  revTime: string | null;
+}
+
+export interface MedicationDetail {
+  description: string | null;
+  genericName: string | null;
+  strength: string | null;
+  strengthUnit: string | null;
+  directions: string | null;
+  status: string | null;
+  narcotic: boolean | null;
+  rxNormId: string | null;
+  startTime: string | null;
+  orderTime: string | null;
+  createdTime: string | null;
+  revTime: string | null;
+}
+
+export interface AllergyDetail {
+  allergen: string | null;
+  category: string | null;
+  type: string | null;
+  severity: string | null;
+  reactionType: string | null;
+  reactionSubType: string | null;
+  reactionNote: string | null;
+  clinicalStatus: string | null;
+  onsetDate: string | null;
+  resolvedDate: string | null;
+  createdBy: string | null;
+  createdTime: string | null;
+  revBy: string | null;
+  revTime: string | null;
+}
+
+export interface ObservationDetail {
+  method: string | null;
+  recordedBy: string | null;
+  recordedTime: string | null;
+  /** Free-form JSON, e.g. `{ "type": "PainLevel", "value": 0 }`. */
+  data: unknown;
+}
+
+/** Full detail returned for a single matched patient — demographics + every child record. */
 export interface PatientDetail {
   id: string;
   nameFirst: string | null;
   nameLast: string | null;
   dob: string | null;
   gender: string | null;
+  ethnicityDescription: string | null;
+  legalMailingAddress: unknown;
   status: string | null;
   group: string;
-  conditions: Array<{
-    icd10Code: string | null;
-    icd10Description: string | null;
-    clinicalStatus: string | null;
-    isPrimaryDiagnosis: boolean | null;
-  }>;
-  medications: Array<{
-    description: string | null;
-    genericName: string | null;
-    strength: string | null;
-    strengthUnit: string | null;
-    directions: string | null;
-    status: string | null;
-    narcotic: boolean | null;
-  }>;
-  allergies: Array<{
-    allergen: string | null;
-    category: string | null;
-    severity: string | null;
-    reactionType: string | null;
-    clinicalStatus: string | null;
-  }>;
-  observations: Array<{
-    method: string | null;
-    recordedTime: string | null;
-    data: unknown;
-  }>;
+  email: string | null;
+  phone: string | null;
+  outpatient: boolean | null;
+  onLeave: boolean | null;
+  // Stay / location
+  unitDescription: string | null;
+  floorDescription: string | null;
+  roomDescription: string | null;
+  bedDescription: string | null;
+  admissionTime: string | null;
+  dischargeTime: string | null;
+  deathTime: string | null;
+  // Audit
+  revBy: string | null;
+  revTime: string | null;
+  // Child records
+  conditions: ConditionDetail[];
+  medications: MedicationDetail[];
+  allergies: AllergyDetail[];
+  observations: ObservationDetail[];
 }
 
 export interface FindPatientResult {
@@ -69,7 +123,13 @@ export interface FindPatientResult {
 }
 
 const MAX_MATCHES = 5;
-const OBSERVATION_LIMIT = 25;
+const OBSERVATION_LIMIT = 50;
+
+/** Date-only (`YYYY-MM-DD`) for `@db.Date` columns. */
+const dateOnly = (d: Date | null): string | null =>
+  d ? d.toISOString().slice(0, 10) : null;
+/** Full ISO timestamp for `@db.Timestamptz` columns. */
+const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 
 /**
  * Build the Prisma `where` for the supplied criteria, precision-first:
@@ -103,8 +163,10 @@ function buildWhere({ patientId, name }: FindPatientToolInput) {
 
 /**
  * Factory: returns a LangChain tool that resolves patient(s) by ID and/or name and returns
- * their details (demographics + conditions + medications + allergies + a sample of
- * observations).
+ * the COMPLETE record for each — all demographics plus every condition, medication, allergy
+ * and observation. The result is the terminal step of the agent (see
+ * `createTerminateAfterToolMiddleware`): it is returned to the client verbatim, not summarized
+ * by the model, so the UI can render the full patient object.
  */
 export function createFindPatientTool(prisma: PrismaService) {
   return tool(
@@ -115,48 +177,17 @@ export function createFindPatientTool(prisma: PrismaService) {
       // No usable criteria -> empty result (the agent should emit the safe fallback).
       if (!where) return { query, matchCount: 0, patients: [] };
 
+      // `include`-style full fetch: pull every column of the patient and each child table.
       const patients = await prisma.patient.findMany({
         where,
         take: MAX_MATCHES,
         orderBy: [{ nameLast: 'asc' }, { nameFirst: 'asc' }],
-        select: {
-          id: true,
-          nameFirst: true,
-          nameLast: true,
-          dob: true,
-          gender: true,
-          status: true,
-          group: true,
-          conditions: {
-            select: {
-              icd10Code: true,
-              icd10Description: true,
-              clinicalStatus: true,
-              isPrimaryDiagnosis: true,
-            },
-          },
-          medications: {
-            select: {
-              description: true,
-              genericName: true,
-              strength: true,
-              strengthUnit: true,
-              directions: true,
-              status: true,
-              narcotic: true,
-            },
-          },
-          allergies: {
-            select: {
-              allergen: true,
-              category: true,
-              severity: true,
-              reactionType: true,
-              clinicalStatus: true,
-            },
-          },
+        include: {
+          conditions: true,
+          medications: true,
+          allergies: true,
           observations: {
-            select: { method: true, recordedTime: true, data: true },
+            orderBy: { recordedTime: 'desc' },
             take: OBSERVATION_LIMIT,
           },
         },
@@ -166,16 +197,71 @@ export function createFindPatientTool(prisma: PrismaService) {
         id: p.id,
         nameFirst: p.nameFirst,
         nameLast: p.nameLast,
-        dob: p.dob ? p.dob.toISOString().slice(0, 10) : null,
+        dob: dateOnly(p.dob),
         gender: p.gender,
+        ethnicityDescription: p.ethnicityDescription,
+        legalMailingAddress: p.legalMailingAddress,
         status: p.status,
         group: p.group,
-        conditions: p.conditions,
-        medications: p.medications,
-        allergies: p.allergies,
+        email: p.email,
+        phone: p.phone,
+        outpatient: p.outpatient,
+        onLeave: p.onLeave,
+        unitDescription: p.unitDescription,
+        floorDescription: p.floorDescription,
+        roomDescription: p.roomDescription,
+        bedDescription: p.bedDescription,
+        admissionTime: iso(p.admissionTime),
+        dischargeTime: iso(p.dischargeTime),
+        deathTime: iso(p.deathTime),
+        revBy: p.revBy,
+        revTime: iso(p.revTime),
+        conditions: p.conditions.map((c) => ({
+          clinicalStatus: c.clinicalStatus,
+          icd10Code: c.icd10Code,
+          icd10Description: c.icd10Description,
+          isPrimaryDiagnosis: c.isPrimaryDiagnosis,
+          onsetDate: dateOnly(c.onsetDate),
+          resolvedDate: dateOnly(c.resolvedDate),
+          createdBy: c.createdBy,
+          createdTime: iso(c.createdTime),
+          revBy: c.revBy,
+          revTime: iso(c.revTime),
+        })),
+        medications: p.medications.map((m) => ({
+          description: m.description,
+          genericName: m.genericName,
+          strength: m.strength,
+          strengthUnit: m.strengthUnit,
+          directions: m.directions,
+          status: m.status,
+          narcotic: m.narcotic,
+          rxNormId: m.rxNormId,
+          startTime: dateOnly(m.startTime),
+          orderTime: iso(m.orderTime),
+          createdTime: iso(m.createdTime),
+          revTime: iso(m.revTime),
+        })),
+        allergies: p.allergies.map((a) => ({
+          allergen: a.allergen,
+          category: a.category,
+          type: a.type,
+          severity: a.severity,
+          reactionType: a.reactionType,
+          reactionSubType: a.reactionSubType,
+          reactionNote: a.reactionNote,
+          clinicalStatus: a.clinicalStatus,
+          onsetDate: dateOnly(a.onsetDate),
+          resolvedDate: dateOnly(a.resolvedDate),
+          createdBy: a.createdBy,
+          createdTime: iso(a.createdTime),
+          revBy: a.revBy,
+          revTime: iso(a.revTime),
+        })),
         observations: p.observations.map((o) => ({
           method: o.method,
-          recordedTime: o.recordedTime ? o.recordedTime.toISOString() : null,
+          recordedBy: o.recordedBy,
+          recordedTime: iso(o.recordedTime),
           data: o.data,
         })),
       }));
@@ -184,10 +270,10 @@ export function createFindPatientTool(prisma: PrismaService) {
     },
     {
       name: 'find_patient',
-      description: `Resolve a patient by ID and/or name and return their details: demographics,
-                    conditions, medications, allergies, and recent observations. Pass the patient
-                    UUID (preferred when given) and/or a full/partial name. Searches across all
-                    patients; returns matchCount 0 when nothing matches.`,
+      description: `Resolve a patient by ID and/or name and return their COMPLETE record:
+                    demographics, every condition, medication, allergy, and recent observations.
+                    Pass the patient UUID (preferred when given) and/or a full/partial name.
+                    Searches across all patients; returns matchCount 0 when nothing matches.`,
       schema: findPatientToolSchema,
     },
   );

@@ -8,11 +8,100 @@ import type { CohortGroup } from '../theme/palette';
 export const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '') ?? 'http://localhost:3000';
 
-/** Result returned by the backend's `/qa/query` route. */
+// ── Patient record types — mirror the backend's find_patient tool output 1:1
+//    (backend/src/agents/tools/find-patient.tool.ts). The agent returns the FULL
+//    record so the UI can render it directly. ──
+
+export interface ConditionDetail {
+  clinicalStatus: string | null;
+  icd10Code: string | null;
+  icd10Description: string | null;
+  isPrimaryDiagnosis: boolean | null;
+  onsetDate: string | null;
+  resolvedDate: string | null;
+  createdBy: string | null;
+  createdTime: string | null;
+  revBy: string | null;
+  revTime: string | null;
+}
+
+export interface MedicationDetail {
+  description: string | null;
+  genericName: string | null;
+  strength: string | null;
+  strengthUnit: string | null;
+  directions: string | null;
+  status: string | null;
+  narcotic: boolean | null;
+  rxNormId: string | null;
+  startTime: string | null;
+  orderTime: string | null;
+  createdTime: string | null;
+  revTime: string | null;
+}
+
+export interface AllergyDetail {
+  allergen: string | null;
+  category: string | null;
+  type: string | null;
+  severity: string | null;
+  reactionType: string | null;
+  reactionSubType: string | null;
+  reactionNote: string | null;
+  clinicalStatus: string | null;
+  onsetDate: string | null;
+  resolvedDate: string | null;
+  createdBy: string | null;
+  createdTime: string | null;
+  revBy: string | null;
+  revTime: string | null;
+}
+
+export interface ObservationDetail {
+  method: string | null;
+  recordedBy: string | null;
+  recordedTime: string | null;
+  data: unknown;
+}
+
+export interface PatientDetail {
+  id: string;
+  nameFirst: string | null;
+  nameLast: string | null;
+  dob: string | null;
+  gender: string | null;
+  ethnicityDescription: string | null;
+  legalMailingAddress: unknown;
+  status: string | null;
+  group: string;
+  email: string | null;
+  phone: string | null;
+  outpatient: boolean | null;
+  onLeave: boolean | null;
+  unitDescription: string | null;
+  floorDescription: string | null;
+  roomDescription: string | null;
+  bedDescription: string | null;
+  admissionTime: string | null;
+  dischargeTime: string | null;
+  deathTime: string | null;
+  revBy: string | null;
+  revTime: string | null;
+  conditions: ConditionDetail[];
+  medications: MedicationDetail[];
+  allergies: AllergyDetail[];
+  observations: ObservationDetail[];
+}
+
+/**
+ * Result returned by the backend's `/qa/query` route. The agent resolves a patient and
+ * returns the full record(s); `fallback` is set instead when nothing matched.
+ */
 export interface QaResult {
-  group: CohortGroup;
   question: string;
-  answer: string;
+  matchCount: number;
+  patients: PatientDetail[];
+  fallback?: string;
 }
 
 export class ApiError extends Error {
