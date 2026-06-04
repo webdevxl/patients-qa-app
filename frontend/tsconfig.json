@@ -1,6 +1,13 @@
 {
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "strict": true
+    "strict": true,
+    // Tamagui's packages ship their full style-prop types behind `exports`-map
+    // conditions that only resolve under a modern resolver. Expo's base sets
+    // "node10", which silently degrades Tamagui components to a base View type
+    // (style props like `backgroundColor`/`alignItems` disappear). "bundler"
+    // matches how Metro actually resolves modules and restores the real types.
+    "moduleResolution": "bundler",
+    "module": "esnext"
   }
 }

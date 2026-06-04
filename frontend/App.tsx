@@ -1,44 +1,36 @@
+// App entry. Composition root: Tamagui design system -> safe-area context -> session
+// state -> the two-screen flow (cohort selection, then cohort-scoped chat).
+//
+// Navigation is intentionally a single piece of session state rather than a router:
+// the product is exactly two steps, and gating the chat behind "is a cohort selected"
+// keeps the central safety rule structural — there is simply no chat screen to reach
+// without an active cohort.
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { TamaguiProvider } from 'tamagui';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import config from './tamagui.config';
+import { SessionProvider, useSession } from './src/state/SessionProvider';
+import { CohortSelectScreen } from './src/screens/CohortSelectScreen';
+import { ChatScreen } from './src/screens/ChatScreen';
+
+function Root() {
+  const { session, selectCohort, clearCohort } = useSession();
+
+  if (!session) {
+    return <CohortSelectScreen onSelect={(group) => selectCohort(group)} />;
+  }
+  return <ChatScreen group={session.group} onSwitchCohort={clearCohort} />;
+}
 
 export default function App() {
   return (
-    <View style={styles.container}>
-      <StatusBar style="light" />
-      <Text style={styles.title}>Patient Q&A</Text>
-      <Text style={styles.subtitle}>AI Assistant — scaffold</Text>
-      <Text style={styles.note}>
-        Cohort selection and the chat interface come later. This blank screen
-        confirms the Expo app builds and runs.
-      </Text>
-    </View>
+    <TamaguiProvider config={config} defaultTheme="light">
+      <SafeAreaProvider>
+        <SessionProvider>
+          <StatusBar style="dark" />
+          <Root />
+        </SessionProvider>
+      </SafeAreaProvider>
+    </TamaguiProvider>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f172a',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  title: {
-    color: '#f8fafc',
-    fontSize: 32,
-    fontWeight: '700',
-  },
-  subtitle: {
-    color: '#94a3b8',
-    fontSize: 16,
-    marginTop: 8,
-  },
-  note: {
-    color: '#64748b',
-    fontSize: 14,
-    textAlign: 'center',
-    marginTop: 24,
-    maxWidth: 320,
-    lineHeight: 20,
-  },
-});

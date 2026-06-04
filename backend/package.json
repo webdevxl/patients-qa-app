@@ -17,16 +17,16 @@
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"
   },
   "dependencies": {
+    "@langchain/core": "^1.0.0",
+    "@langchain/openai": "^1.0.0",
     "@nestjs/common": "^11.0.0",
     "@nestjs/config": "^4.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
     "@prisma/client": "^6.3.0",
-    "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1",
-    "@langchain/core": "^0.3.0",
-    "@langchain/openai": "^0.3.0",
-    "langchain": "^0.3.0"
+    "langchain": "^1.0.0",
+    "langsmith": "^0.7.4",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.0",
