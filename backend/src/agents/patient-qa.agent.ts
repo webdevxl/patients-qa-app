@@ -6,6 +6,7 @@ import {
   type BaseMessage,
 } from '@langchain/core/messages';
 import { z } from 'zod';
+import { observationFilterSchema } from './tools/find-patients.tool';
 
 /**
  * Safe fallback string (used verbatim per the spec) for when no patient can be resolved.
@@ -65,6 +66,16 @@ export const extractionSchema = z.object({
         'to ..." here, never to conditionQuery. Combine with conditionQuery when the message asks ' +
         'about both ("diabetics allergic to penicillin"). Omit for a specific named patient.',
     ),
+  observationFilter: observationFilterSchema
+    .nullable()
+    .describe(
+      'A numeric filter over a vital sign / measurement to search ACROSS patients, e.g. "weight ' +
+        'over 200 lbs" ⇒ { metric: "Weight", operator: "gt", value: 200 }. Use the metric\'s ' +
+        'native unit (Lbs, Inches, °F, mg/dL, bpm, mmHg, %, Breaths/min, pain 0–10) and emit the ' +
+        'raw number — do NOT convert units. For BloodPressure set component (default systolic). ' +
+        'Set this ALONGSIDE conditionQuery/allergyQuery when both are asked ("diabetics with ' +
+        'heart rate over 100"). Null when no measurement comparison is requested.',
+    ),
 });
 
 export type Extraction = z.infer<typeof extractionSchema>;
@@ -116,8 +127,9 @@ const EXTRACTION_SYSTEM_PROMPT = `You extract structured search parameters from 
 - name: a person's name when the message is about ONE specific patient (full, first, or last). Resolve pronouns/references ("he/she/they", "that patient", "their meds") to the patient established in earlier turns and put that name here. Identity takes priority: if the message names a specific patient AND mentions a condition/allergy ("Is John Smith allergic to penicillin?"), set name and leave the condition/allergy fields empty.
 - conditionQuery: a disease, diagnosis, or symptom to search ACROSS patients ("which patients have diabetes?"). The clinical concept only. Leave empty for a specific named patient.
 - allergyQuery: a substance from an "allergic to X" search ACROSS patients ("who is allergic to penicillin?"). The substance only. An allergy is NOT a diagnosis — route "allergic to ..." here, never to conditionQuery. Set BOTH conditionQuery and allergyQuery when the message combines them ("diabetics allergic to penicillin").
+- observationFilter: a numeric comparison over a vital sign / measurement ACROSS patients ("weight over 200 lbs", "heart rate above 100", "oxygen saturation below 90"). metric is one of PainLevel, Weight, Height, BloodPressure, BloodSugar, HeartRate, Temperature, RespiratoryRate, OxygenSaturation; operator is gt/gte/lt/lte/eq/between (value2 only for between); value is the raw number in the metric's NATIVE unit (Lbs, Inches, °F, mg/dL, bpm, mmHg, %, Breaths/min, pain 0–10) — never convert units. For BloodPressure set component to systolic or diastolic (default systolic). Set observationFilter ALONGSIDE conditionQuery/allergyQuery when the message combines them ("diabetics with heart rate over 100"). Leave null when no measurement comparison is asked.
 
-If the message identifies no specific patient and asks for no searchable condition or allergy, leave every field empty.`;
+If the message identifies no specific patient and asks for no searchable condition, allergy, or measurement, leave every field empty.`;
 
 /** Token usage for one extraction call (best-effort; surfaced for observability). */
 export interface ExtractionUsage {

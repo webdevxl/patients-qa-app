@@ -101,18 +101,20 @@ function introText(patients: PatientDetail[]): string {
   return `Found ${patients.length} matching patients — showing each record below. Refine by full name or patient ID to narrow it down.`;
 }
 
-// Lead-in line shown above the semantic-search match cards. The same tool serves condition and
-// allergy queries (and both at once), so the wording adapts to what the results matched on.
+// Lead-in line shown above the semantic-search match cards. The same tool serves condition,
+// allergy and measurement queries (in any combination), so the wording adapts to what matched.
 function conditionIntro(matches: ConditionMatch[]): string {
   const n = matches.length;
-  const hasCondition = matches.some((m) => m.matchedCondition);
-  const hasAllergy = matches.some((m) => m.matchedAllergy);
+  const dims: string[] = [];
+  if (matches.some((m) => m.matchedCondition)) dims.push('diagnosis');
+  if (matches.some((m) => m.matchedAllergy)) dims.push('allergy');
+  if (matches.some((m) => m.matchedObservation)) dims.push('measurement');
   const what =
-    hasCondition && hasAllergy
-      ? 'diagnosis and allergy'
-      : hasAllergy
-        ? 'allergy'
-        : 'diagnosis';
+    dims.length === 0
+      ? 'record'
+      : dims.length <= 2
+        ? dims.join(' and ')
+        : `${dims.slice(0, -1).join(', ')} and ${dims[dims.length - 1]}`;
   return `Found ${n} patient${n === 1 ? '' : 's'} with a matching ${what} — each shown below. Ask about one by name for the full record.`;
 }
 

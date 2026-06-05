@@ -100,6 +100,9 @@ export interface PatientDetail {
  * `matchedCondition` / `matchedAllergy` is set per match. Mirrors the backend ConditionMatch
  * (backend/src/agents/tools/find-patients-by-condition.tool.ts).
  */
+/** Which reading of a two-field BloodPressure measurement was compared. */
+export type BloodPressureComponent = 'systolic' | 'diastolic';
+
 export interface ConditionMatch {
   patient: PatientDetail;
   /** Set for condition searches — the matched ICD-10 diagnosis. */
@@ -115,6 +118,14 @@ export interface ConditionMatch {
     category: string | null;
     /** Cosine similarity in [-1, 1]; higher = closer. */
     similarity: number;
+  };
+  /** Set for measurement searches — the reading that passed the numeric filter. */
+  matchedObservation?: {
+    metric: string;
+    component?: BloodPressureComponent;
+    value: number;
+    unit: string | null;
+    recordedTime: string | null;
   };
   confidence: 'High' | 'Medium' | 'Low';
 }

@@ -7,6 +7,53 @@ import { toVectorLiteral } from '../../embeddings/embeddings.factory';
 import type { CohortGroup } from '../../auth/cohort.types';
 
 /**
+ * Observation measurements live in `patient_observation.data` (JSONB) as
+ * `{ "type": <metric>, "unit": <unit>, "value": <n> }` — except BloodPressure, which carries
+ * `systolicValue`/`diastolicValue` instead of a single `value`. This map is the SINGLE SOURCE OF
+ * TRUTH for each metric's JSON value key(s) and canonical unit; it drives both the SQL builder and
+ * the human-readable summary. Units are fixed per metric (the dataset never varies them), so a
+ * measurement filter just compares the raw number against the metric's native unit.
+ */
+export const OBSERVATION_METRICS = {
+  PainLevel: { unit: null, keys: ['value'] },
+  Weight: { unit: 'Lbs', keys: ['value'] },
+  Height: { unit: 'Inches', keys: ['value'] },
+  BloodPressure: { unit: 'mmHg', keys: ['systolicValue', 'diastolicValue'] },
+  BloodSugar: { unit: 'mg/dL', keys: ['value'] },
+  HeartRate: { unit: 'bpm', keys: ['value'] },
+  Temperature: { unit: '°F', keys: ['value'] },
+  RespiratoryRate: { unit: 'Breaths/min', keys: ['value'] },
+  OxygenSaturation: { unit: '%', keys: ['value'] },
+} as const satisfies Record<string, { unit: string | null; keys: readonly string[] }>;
+
+export type ObservationMetric = keyof typeof OBSERVATION_METRICS;
+
+const OBSERVATION_METRIC_NAMES = Object.keys(OBSERVATION_METRICS) as [
+  ObservationMetric,
+  ...ObservationMetric[],
+];
+
+/** Which reading of a two-field BloodPressure measurement to compare. */
+export const BLOOD_PRESSURE_COMPONENTS = ['systolic', 'diastolic'] as const;
+export type BloodPressureComponent = (typeof BLOOD_PRESSURE_COMPONENTS)[number];
+
+/**
+ * Structured numeric filter over ONE observation metric, e.g. "weight over 200 lbs" ⇒
+ * `{ metric: 'Weight', operator: 'gt', value: 200 }`. `value2` is the upper bound for `between`;
+ * `component` selects systolic/diastolic for BloodPressure (ignored for single-value metrics).
+ * Shared so the extractor (`.nullable()`) and the tool schema (`.optional()`) stay in lockstep.
+ */
+export const observationFilterSchema = z.object({
+  metric: z.enum(OBSERVATION_METRIC_NAMES),
+  operator: z.enum(['gt', 'gte', 'lt', 'lte', 'eq', 'between']),
+  value: z.number(),
+  value2: z.number().nullable(),
+  component: z.enum(BLOOD_PRESSURE_COMPONENTS).nullable(),
+});
+
+export type ObservationFilter = z.infer<typeof observationFilterSchema>;
+
+/**
  * THE single patient-retrieval tool. It resolves patients two ways and the caller need not choose
  * between two tools — `findPatients` routes internally (identity wins):
  *   • by IDENTITY  — patientId and/or name → exact DB lookup, returns FULL records (`patients`).
@@ -46,6 +93,13 @@ export const findPatientsToolSchema = z.object({
       "An allergen/substance for an 'allergic to X' search ACROSS patients, e.g. 'penicillin', " +
         "'sulfa'. The substance only — never a name or ID. An allergy is NOT a diagnosis.",
     ),
+  observationFilter: observationFilterSchema
+    .optional()
+    .describe(
+      "A numeric filter over a vital-sign/measurement ACROSS patients, e.g. 'weight over 200 " +
+        "lbs' ⇒ { metric: 'Weight', operator: 'gt', value: 200 }. Combine with conditionQuery/" +
+        "allergyQuery to intersect ('diabetics with heart rate over 100').",
+    ),
 });
 
 export type FindPatientsToolInput = z.infer<typeof findPatientsToolSchema>;
@@ -59,6 +113,7 @@ export interface FindPatientsInput {
   name?: string | null;
   conditionQuery?: string | null;
   allergyQuery?: string | null;
+  observationFilter?: ObservationFilter | null;
 }
 
 // ── Per-record detail types. These mirror the Prisma models 1:1 (minus the internal
@@ -175,6 +230,18 @@ export interface ConditionMatch {
     /** Cosine similarity in [-1, 1]; higher = closer. */
     similarity: number;
   };
+  /**
+   * The reading that satisfied an observation filter (set for measurement searches). Deterministic
+   * — the patient's value either passes the numeric predicate or it doesn't.
+   */
+  matchedObservation?: {
+    metric: ObservationMetric;
+    /** Which value was compared for BloodPressure; undefined for single-value metrics. */
+    component?: BloodPressureComponent;
+    value: number;
+    unit: string | null;
+    recordedTime: string | null;
+  };
   confidence: 'High' | 'Medium' | 'Low';
 }
 
@@ -190,6 +257,8 @@ export interface FindPatientsResult {
     name?: string;
     conditionQuery?: string;
     allergyQuery?: string;
+    /** Human-readable measurement filter, e.g. "Weight > 200 Lbs". */
+    observation?: string;
   };
   matchCount: number;
   patients?: PatientDetail[];
@@ -350,19 +419,141 @@ interface AllergyRankRow {
 }
 
 /**
- * Per-patient accumulator: a patient's best condition hit and/or best allergy hit. A patient
- * surfaced by BOTH searches carries both, so the match can report a condition AND an allergy.
+ * Per-patient accumulator: a patient's best condition hit and/or best allergy hit, plus the
+ * observation reading that passed a measurement filter. A patient surfaced by several searches
+ * carries all of them, so one match can report a condition AND an allergy AND a measurement.
  */
 interface Candidate {
   patientId: string;
   matchedCondition?: ConditionMatch['matchedCondition'];
   matchedAllergy?: ConditionMatch['matchedAllergy'];
+  matchedObservation?: ConditionMatch['matchedObservation'];
 }
 
 function toConfidence(similarity: number): ConditionMatch['confidence'] {
   if (similarity >= 0.6) return 'High';
   if (similarity >= 0.5) return 'Medium';
   return 'Low';
+}
+
+/** Raw row from the observation filter query (one per matching patient, latest reading). */
+interface ObservationRankRow {
+  patientId: string;
+  value: number | string | null;
+  recordedTime: Date | string | null;
+}
+
+/** Operator → symbol, for the human-readable measurement summary. */
+const OBSERVATION_OP_SYMBOL: Record<ObservationFilter['operator'], string> = {
+  gt: '>',
+  gte: '≥',
+  lt: '<',
+  lte: '≤',
+  eq: '=',
+  between: 'between',
+};
+
+/**
+ * Map the WHITELISTED operator enum to a constant SQL comparison fragment. The operator is the only
+ * structural SQL token; it can only ever be one of these six literals (it comes from a Zod enum),
+ * so no user text reaches the query as SQL. `valueExpr` is a parameterized JSON-extraction
+ * fragment and the bounds are bound parameters.
+ */
+function observationPredicate(
+  valueExpr: Prisma.Sql,
+  operator: ObservationFilter['operator'],
+  value: number,
+  value2: number | null,
+): Prisma.Sql {
+  switch (operator) {
+    case 'gt':
+      return Prisma.sql`${valueExpr} > ${value}`;
+    case 'gte':
+      return Prisma.sql`${valueExpr} >= ${value}`;
+    case 'lt':
+      return Prisma.sql`${valueExpr} < ${value}`;
+    case 'lte':
+      return Prisma.sql`${valueExpr} <= ${value}`;
+    case 'eq':
+      return Prisma.sql`${valueExpr} = ${value}`;
+    case 'between': {
+      // Missing upper bound degrades to equality rather than erroring; order the bounds so a
+      // reversed range ("between 200 and 100") still works.
+      const hi = value2 ?? value;
+      return Prisma.sql`${valueExpr} BETWEEN ${Math.min(value, hi)} AND ${Math.max(value, hi)}`;
+    }
+  }
+}
+
+/** Build a human-readable summary of a measurement filter, e.g. "Weight > 200 Lbs". */
+function describeObservation(f: ObservationFilter): string {
+  const def = OBSERVATION_METRICS[f.metric];
+  const unit = def.unit ? ` ${def.unit}` : '';
+  const component = def.keys.length > 1 ? ` (${f.component ?? 'systolic'})` : '';
+  if (f.operator === 'between') {
+    return `${f.metric}${component} between ${f.value} and ${f.value2 ?? f.value}${unit}`;
+  }
+  return `${f.metric}${component} ${OBSERVATION_OP_SYMBOL[f.operator]} ${f.value}${unit}`;
+}
+
+/**
+ * Observation (measurement) filter: numeric predicate over the JSONB `data` column. Unlike the
+ * condition/allergy paths this is DETERMINISTIC — a patient's reading either passes or it doesn't,
+ * no embeddings. Returns one entry per matching patient (their latest matching reading).
+ *
+ * Cohort scoping is enforced in the SQL itself (`AND p."group" = ${group}`), identical to the
+ * similarity queries. Injection-safe: the metric, the JSON value-key and the unit key are bound
+ * PARAMETERS; the operator is a whitelisted constant fragment; only numeric bounds are user data.
+ */
+async function findObservationMatches(
+  prisma: PrismaService,
+  group: CohortGroup,
+  filter: ObservationFilter,
+): Promise<Map<string, NonNullable<ConditionMatch['matchedObservation']>>> {
+  const def = OBSERVATION_METRICS[filter.metric];
+  // BloodPressure has systolic/diastolic; single-value metrics ignore `component`.
+  const component: BloodPressureComponent | undefined =
+    def.keys.length > 1
+      ? filter.component === 'diastolic'
+        ? 'diastolic'
+        : 'systolic'
+      : undefined;
+  const jsonKey = component === 'diastolic' ? def.keys[1] : def.keys[0];
+
+  const valueExpr = Prisma.sql`(o.data->>${jsonKey})::numeric`;
+  const predicate = observationPredicate(
+    valueExpr,
+    filter.operator,
+    filter.value,
+    filter.value2,
+  );
+
+  // DISTINCT ON keeps each patient's latest matching reading (recorded_time DESC). For this
+  // dataset there is exactly one reading per (patient, metric), so this is also "any/highest".
+  const rows = await prisma.$queryRaw<ObservationRankRow[]>`
+    SELECT DISTINCT ON (p.id)
+      p.id            AS "patientId",
+      ${valueExpr}    AS "value",
+      o.recorded_time AS "recordedTime"
+    FROM patient_observation o
+    JOIN patient p ON p.id = o.patient_id
+    WHERE p."group" = ${group}
+      AND o.data->>'type' = ${filter.metric}
+      AND ${predicate}
+    ORDER BY p.id, o.recorded_time DESC NULLS LAST
+  `;
+
+  const out = new Map<string, NonNullable<ConditionMatch['matchedObservation']>>();
+  for (const r of rows) {
+    out.set(r.patientId, {
+      metric: filter.metric,
+      component,
+      value: Number(r.value),
+      unit: def.unit,
+      recordedTime: r.recordedTime ? new Date(r.recordedTime).toISOString() : null,
+    });
+  }
+  return out;
 }
 
 /** Identity path: resolve by id/name within the active cohort, return full records. */
@@ -384,15 +575,18 @@ async function findByIdentity(
 }
 
 /**
- * Attribute path: semantic search by condition and/or allergy.
+ * Attribute path: search ACROSS patients by condition, allergy, and/or a measurement filter.
  *
- * Flow: embed the query → cosine-rank it against the matching vocabulary (the `embedding`
- * pgvector column on `icd_code` for conditions, on `allergen` for allergies) → keep the best
- * match per patient → fetch those patients' FULL records in one query. When BOTH a condition and
- * an allergy are given, a patient surfaced by both carries both hits; ranking uses the strongest.
+ * Flow: embed the condition/allergy query → cosine-rank against the matching vocabulary (the
+ * `embedding` pgvector column on `icd_code` / `allergen`) → keep the best match per patient. The
+ * condition and allergy searches UNION (a patient surfaced by either appears). An
+ * `observationFilter` then applies as an INTERSECTING constraint: with a co-given condition/allergy
+ * it keeps only patients who ALSO pass the measurement ("diabetics with heart rate over 100");
+ * on its own it returns every patient passing the measurement. Finally the surviving patients'
+ * FULL records are fetched in one query.
  *
- * Cohort scoping is enforced in the SQL itself (`AND p."group" = ${group}`), so the similarity
- * search can only ever surface patients in the active cohort.
+ * Cohort scoping is enforced in every SQL statement (`AND p."group" = ${group}`), so no path can
+ * surface a patient outside the active cohort.
  */
 async function findByAttribute(
   prisma: PrismaService,
@@ -400,6 +594,7 @@ async function findByAttribute(
   group: CohortGroup,
   conditionQuery?: string,
   allergyQuery?: string,
+  observationFilter?: ObservationFilter | null,
 ): Promise<ConditionMatch[]> {
   const maxDistance = 1 - SIMILARITY_THRESHOLD;
   const byPatient = new Map<string, Candidate>();
@@ -472,14 +667,45 @@ async function findByAttribute(
     }
   }
 
-  // Rank patients by their strongest hit (max of condition/allergy similarity), capped.
+  const hasFuzzy = Boolean(conditionQuery || allergyQuery);
+
+  // ── Observation filter: deterministic numeric predicate over the JSONB `data` column. ──
+  if (observationFilter) {
+    const obs = await findObservationMatches(prisma, group, observationFilter);
+    if (hasFuzzy) {
+      // Intersect: drop fuzzy candidates that fail the measurement; annotate the rest.
+      for (const [patientId, c] of byPatient) {
+        const m = obs.get(patientId);
+        if (m) c.matchedObservation = m;
+        else byPatient.delete(patientId);
+      }
+    } else {
+      // Standalone measurement search: each passing patient becomes a candidate.
+      for (const [patientId, m] of obs) {
+        upsert(patientId).matchedObservation = m;
+      }
+    }
+  }
+
   const bestSimilarity = (c: Candidate): number =>
     Math.max(
       c.matchedCondition?.similarity ?? -1,
       c.matchedAllergy?.similarity ?? -1,
     );
+
+  // Rank by the explicit numeric criterion when a measurement filter ran (most-extreme reading
+  // first; ascending for </<=), otherwise by the strongest similarity hit. Capped at MAX_MATCHES.
+  const ascending =
+    observationFilter?.operator === 'lt' || observationFilter?.operator === 'lte';
   const ranked = [...byPatient.values()]
-    .sort((a, b) => bestSimilarity(b) - bestSimilarity(a))
+    .sort((a, b) => {
+      if (observationFilter) {
+        const va = a.matchedObservation?.value ?? Number.NEGATIVE_INFINITY;
+        const vb = b.matchedObservation?.value ?? Number.NEGATIVE_INFINITY;
+        return ascending ? va - vb : vb - va;
+      }
+      return bestSimilarity(b) - bestSimilarity(a);
+    })
     .slice(0, MAX_MATCHES);
   if (ranked.length === 0) return [];
 
@@ -506,11 +732,24 @@ async function findByAttribute(
             similarity: Number(c.matchedAllergy.similarity.toFixed(4)),
           }
         : undefined;
+      const matchedObservation = c.matchedObservation
+        ? {
+            ...c.matchedObservation,
+            value: Number(c.matchedObservation.value.toFixed(2)),
+          }
+        : undefined;
+      // A pure measurement match is a deterministic pass ⇒ High; when a fuzzy condition/allergy
+      // is also present, confidence reflects that (the only uncertain part).
+      const confidence =
+        c.matchedCondition || c.matchedAllergy
+          ? toConfidence(bestSimilarity(c))
+          : ('High' as const);
       return {
         patient,
         matchedCondition,
         matchedAllergy,
-        confidence: toConfidence(bestSimilarity(c)),
+        matchedObservation,
+        confidence,
       };
     })
     .filter((m): m is ConditionMatch => m !== null);
@@ -536,21 +775,29 @@ export async function findPatients(
   const name = input.name?.trim() || undefined;
   const conditionQuery = input.conditionQuery?.trim() || undefined;
   const allergyQuery = input.allergyQuery?.trim() || undefined;
-  const query = { patientId, name, conditionQuery, allergyQuery };
+  const observationFilter = input.observationFilter ?? undefined;
+  const query = {
+    patientId,
+    name,
+    conditionQuery,
+    allergyQuery,
+    observation: observationFilter ? describeObservation(observationFilter) : undefined,
+  };
 
-  // Identity wins: a specific patient beats a co-mentioned condition/allergy.
+  // Identity wins: a specific patient beats a co-mentioned condition/allergy/measurement.
   if (patientId || name) {
     const patients = await findByIdentity(prisma, group, patientId, name);
     return { query, matchCount: patients.length, patients };
   }
 
-  if (conditionQuery || allergyQuery) {
+  if (conditionQuery || allergyQuery || observationFilter) {
     const matches = await findByAttribute(
       prisma,
       embeddings,
       group,
       conditionQuery,
       allergyQuery,
+      observationFilter,
     );
     return { query, matchCount: matches.length, matches };
   }
@@ -573,14 +820,16 @@ export function createFindPatientsTool(
       findPatients(prisma, embeddings, input, group),
     {
       name: 'find_patients',
-      description: `Find patient(s). ONE tool for both lookups — set whichever field(s) apply:
+      description: `Find patient(s). ONE tool for every lookup — set whichever field(s) apply:
                     • patientId / name → resolve a SPECIFIC patient (returns full records).
                     • conditionQuery → patients with a disease/symptom ("who has diabetes?").
                     • allergyQuery → patients allergic to a substance ("allergic to penicillin");
                       an allergy is NOT a diagnosis. Combine with conditionQuery for both.
-                    Identity (id/name) takes priority over condition/allergy. Pass the clinical
-                    concept / substance ONLY in the query fields — never a name or ID there.
-                    Returns matchCount 0 when nothing resolves/matches.`,
+                    • observationFilter → patients whose vital/measurement passes a numeric test
+                      ("weight over 200 lbs"). Combine with condition/allergy to intersect.
+                    Identity (id/name) takes priority over the across-patient searches. Pass the
+                    clinical concept / substance ONLY in the query fields — never a name or ID
+                    there. Returns matchCount 0 when nothing resolves/matches.`,
       schema: findPatientsToolSchema,
     },
   );

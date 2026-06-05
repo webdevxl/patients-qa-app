@@ -36,7 +36,8 @@ export function ConditionMatchCard({
   /** Tap to expand into the full patient record (opens PatientDetailModal). */
   onPress?: () => void;
 }) {
-  const { patient, matchedCondition, matchedAllergy, confidence } = match;
+  const { patient, matchedCondition, matchedAllergy, matchedObservation, confidence } =
+    match;
   const cc = confidenceColor[confidence];
   const displayName =
     `${patient.nameFirst ?? ''} ${patient.nameLast ?? ''}`.trim() ||
@@ -138,6 +139,29 @@ export function ConditionMatchCard({
               numberOfLines={1}
             >
               {matchedAllergy.category ?? 'Allergy'}
+            </Text>
+          </XStack>
+        ) : null}
+
+        {/* Matched measurement (observation filter). */}
+        {matchedObservation ? (
+          <XStack alignItems="center" gap={6}>
+            <Ionicons name="analytics" size={13} color={accent} />
+            <Text fontSize={13} fontWeight="700" color={palette.label}>
+              {matchedObservation.value}
+              {matchedObservation.unit ? ` ${matchedObservation.unit}` : ''}
+            </Text>
+            <Text
+              flex={1}
+              fontSize={13}
+              color={palette.secondaryLabel}
+              letterSpacing={-0.1}
+              numberOfLines={1}
+            >
+              {matchedObservation.metric}
+              {matchedObservation.component
+                ? ` (${matchedObservation.component})`
+                : ''}
             </Text>
           </XStack>
         ) : null}
