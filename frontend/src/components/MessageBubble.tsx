@@ -8,7 +8,7 @@ import React from 'react';
 import { XStack, YStack, Text } from 'tamagui';
 import { Ionicons } from '@expo/vector-icons';
 import { palette, radius, cardShadow } from '../theme/palette';
-import type { PatientDetail, ConditionMatch } from '../api/client';
+import type { PatientDetail, ConditionMatch, CandidateItem } from '../api/client';
 
 export type Role = 'user' | 'assistant';
 export type Confidence = 'High' | 'Medium' | 'Low';
@@ -23,6 +23,8 @@ export interface ChatMessage {
   patients?: PatientDetail[];
   /** Condition-search hits — rendered as compact ConditionMatchCards beneath the bubble. */
   matches?: ConditionMatch[];
+  /** Disambiguation candidates — rendered as selectable CandidateRows beneath the bubble. */
+  candidates?: CandidateItem[];
   /**
    * Compact one-line summary of what this answer resolved (from `QaResult.contextSummary`).
    * Not rendered — it's echoed back as this turn's `history` content so the backend extractor

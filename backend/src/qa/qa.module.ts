@@ -7,6 +7,10 @@ import {
   createPatientQaExtractor,
   PATIENT_QA_EXTRACTOR,
 } from '../agents/patient-qa.agent';
+import {
+  createPatientAnswerer,
+  PATIENT_ANSWERER,
+} from '../agents/patient-answer.agent';
 
 // PrismaService is available via the @Global() PrismaModule — no import needed here.
 // EmbeddingsModule provides the OpenAI embeddings client for attribute search.
@@ -23,6 +27,18 @@ import {
       useFactory: (config: ConfigService) => {
         const temperature = config.get<string>('OPENAI_CHAT_TEMPERATURE');
         return createPatientQaExtractor({
+          model: config.get<string>('OPENAI_CHAT_MODEL') ?? undefined,
+          temperature: temperature !== undefined ? Number(temperature) : undefined,
+        });
+      },
+      inject: [ConfigService],
+    },
+    // The grounded ANSWERER for the patient-scoped path — same config plumbing as the extractor.
+    {
+      provide: PATIENT_ANSWERER,
+      useFactory: (config: ConfigService) => {
+        const temperature = config.get<string>('OPENAI_CHAT_TEMPERATURE');
+        return createPatientAnswerer({
           model: config.get<string>('OPENAI_CHAT_MODEL') ?? undefined,
           temperature: temperature !== undefined ? Number(temperature) : undefined,
         });

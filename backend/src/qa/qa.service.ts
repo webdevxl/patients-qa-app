@@ -10,7 +10,15 @@ import {
   type Extraction,
 } from '../agents/patient-qa.agent';
 import {
+  PATIENT_ANSWERER,
+  serializePatientForPrompt,
+  type PatientAnswerer,
+  type AnswerConfidence,
+} from '../agents/patient-answer.agent';
+import {
   findPatients,
+  patientInclude,
+  toPatientDetail,
   type FindPatientsResult,
   type PatientDetail,
   type ConditionMatch,
@@ -29,6 +37,14 @@ import type { CohortGroup } from '../auth/cohort.types';
  *                      turn in `history`, so follow-ups ("what about his allergies?") can resolve
  *                      references — WITHOUT re-sending full records to the model.
  *   • traceId        — correlation id, also stamped on every server log line for this request.
+ *
+ * When the request carries a `patientId` (a patient is already selected on the client), the SAME
+ * type instead carries the grounded ANSWER about that one patient:
+ *   • answer         — concise prose grounded in that patient's records.
+ *   • confidence     — High/Medium/Low calibration over the supporting evidence.
+ *   • citations      — the source-record labels ([C1], [M2], …) the answer relied on.
+ * A patient-scoped request that can't be answered (unsupported, cross-cohort id, refusal, error)
+ * still returns the safe fallback exactly like the find path.
  */
 export interface QaResult {
   question: string;
@@ -38,6 +54,10 @@ export interface QaResult {
   matches?: ConditionMatch[];
   fallback?: string;
   contextSummary?: string;
+  // Patient-scoped answer mode (set only when the request carried a patientId):
+  answer?: string;
+  confidence?: AnswerConfidence;
+  citations?: string[];
 }
 
 /** Cap the question length to bound token spend / injection surface (history is capped separately). */
@@ -86,12 +106,14 @@ export class QaService {
     private readonly prisma: PrismaService,
     private readonly embeddings: EmbeddingsService,
     @Inject(PATIENT_QA_EXTRACTOR) private readonly extractor: PatientQaExtractor,
+    @Inject(PATIENT_ANSWERER) private readonly answerer: PatientAnswerer,
   ) {}
 
   async query(
     group: CohortGroup,
     question: string,
     history: ChatTurn[] = [],
+    patientId?: string,
   ): Promise<QaResult> {
     const traceId = randomUUID();
     const shortId = traceId.slice(0, 8);
@@ -99,6 +121,18 @@ export class QaService {
     const elapsed = (): number => Date.now() - startedAt;
 
     const trimmedQuestion = (question ?? '').trim();
+
+    // ── Patient-scoped ANSWER path. When the client has a patient selected it pins it by id; we
+    //    answer about THAT patient (re-verified under the cohort) instead of resolving one from
+    //    text. Branch BEFORE extraction — there is no search to run here. ──
+    if (patientId) {
+      return this.answerAboutPatient(group, patientId, trimmedQuestion, history, {
+        traceId,
+        shortId,
+        elapsed,
+      });
+    }
+
     this.logger.log(
       `🏁 [${shortId}] qa query — cohort ${group} — "${trimmedQuestion.slice(0, 120)}" ` +
         `(history: ${history?.length ?? 0} turn(s))`,
@@ -160,6 +194,89 @@ export class QaService {
     } catch (err) {
       this.logger.error(
         `💥 [${shortId}] retrieval failed`,
+        err instanceof Error ? err.stack : String(err),
+      );
+      return this.safeFallback(question, traceId);
+    }
+  }
+
+  /**
+   * Patient-scoped grounded answer. The patient is already selected on the client (pinned by id);
+   * we re-read THAT record under the caller's cohort and answer the question from it alone.
+   *
+   * Cohort isolation lives here: the `patientId` is client-supplied and never trusted on its own —
+   * the `findFirst({ id, group })` re-derives the record under the token's group, so a foreign-
+   * cohort or unknown id resolves to `null` ⇒ logged as a high-severity boundary event and
+   * answered with the safe fallback. Like `query()`'s find path, every failure mode fails closed.
+   */
+  private async answerAboutPatient(
+    group: CohortGroup,
+    patientId: string,
+    question: string,
+    history: ChatTurn[],
+    ctx: { traceId: string; shortId: string; elapsed: () => number },
+  ): Promise<QaResult> {
+    const { traceId, shortId, elapsed } = ctx;
+    this.logger.log(
+      `🏁 [${shortId}] qa answer — cohort ${group} — patient ${patientId} — ` +
+        `"${question.slice(0, 120)}" (history: ${history?.length ?? 0} turn(s))`,
+    );
+    if (!question) return this.safeFallback(question, traceId);
+    const boundedQuestion = question.slice(0, MAX_QUESTION_CHARS);
+
+    try {
+      // ── Cohort re-verification (the critical isolation defense): re-read THIS patient under the
+      //    caller's group before anything else. ──
+      const row = await this.prisma.patient.findFirst({
+        where: { id: patientId, group },
+        include: patientInclude,
+      });
+      if (!row) {
+        // Unknown id OR a patient in the OTHER cohort — both are blocked identically. High severity.
+        this.logger.warn(
+          `🛡️ [${shortId}] cohort boundary — patient ${patientId} not in cohort ${group} ` +
+            `(unknown or cross-cohort) → blocked, safe fallback`,
+        );
+        return this.safeFallback(question, traceId);
+      }
+
+      // ── Serialize the record + one grounded answer call. ──
+      const { context } = serializePatientForPrompt(toPatientDetail(row));
+      const { result, usage, refused } = await this.answerer.answer(
+        boundedQuestion,
+        context,
+        history,
+      );
+      if (refused) {
+        this.logger.warn(`🛡️ [${shortId}] answerer refused / unparseable → safe fallback`);
+      }
+      if (!result.answerable) {
+        this.logger.log(
+          `🚫 [${shortId}] not answerable from patient ${patientId}'s records (${elapsed()}ms) → fallback`,
+        );
+        return this.safeFallback(question, traceId);
+      }
+      // Normalize citations (strip stray brackets/space the model may add around labels).
+      const citations = result.citations.map((c) => c.replace(/[[\]]/g, '').trim()).filter(Boolean);
+      this.logger.log(
+        `💬 [${shortId}] answered patient ${patientId} — confidence ${result.confidence}, ` +
+          `citations [${citations.join(', ')}] (${elapsed()}ms total)` +
+          (usage
+            ? ` | tokens in/out/total: ${usage.inputTokens ?? '?'}/` +
+              `${usage.outputTokens ?? '?'}/${usage.totalTokens ?? '?'}`
+            : ''),
+      );
+      return {
+        question,
+        traceId,
+        matchCount: 1,
+        answer: result.answer,
+        confidence: result.confidence,
+        citations,
+      };
+    } catch (err) {
+      this.logger.error(
+        `💥 [${shortId}] patient answer path failed (re-fetch or generation)`,
         err instanceof Error ? err.stack : String(err),
       );
       return this.safeFallback(question, traceId);

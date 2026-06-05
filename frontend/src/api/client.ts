@@ -141,13 +141,20 @@ export interface ConditionMatch {
 }
 
 /**
- * Result returned by the backend's `/qa/query` route. The backend extracts search params and
- * routes to one retrieval, so exactly one result array is populated:
+ * Result returned by the backend's `/qa/query` route — the single chat endpoint with two modes:
+ *
+ * FIND mode (no `patientId` sent) — resolve/search patients in the cohort:
  *   • patients       — full record(s) when a specific patient was resolved (find_patient).
  *   • matches        — per-patient hits when searching by condition/allergy.
  *   • fallback       — set instead when nothing matched.
  *   • contextSummary — compact one-line summary of what resolved; echo it back as the assistant
  *                      turn in `history` so follow-ups ("what about his allergies?") resolve.
+ *
+ * ANSWER mode (`patientId` sent — a patient is already selected) — grounded answer about THAT patient:
+ *   • answer         — concise prose grounded only in that patient's records.
+ *   • confidence     — High/Medium/Low calibration over the supporting evidence.
+ *   • citations      — source-record labels ([C1], [M2], …) the answer relied on.
+ * A patient-scoped request that can't be answered still comes back as `fallback`.
  */
 export interface QaResult {
   question: string;
@@ -156,6 +163,9 @@ export interface QaResult {
   matches?: ConditionMatch[];
   fallback?: string;
   contextSummary?: string;
+  answer?: string;
+  confidence?: 'High' | 'Medium' | 'Low';
+  citations?: string[];
 }
 
 /**
@@ -165,6 +175,17 @@ export interface QaResult {
 export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
+}
+
+/**
+ * A patient candidate shown in the disambiguation list (when a find returns more than one). Carries
+ * the full record (so selecting needs no extra request) plus, for attribute searches, what they
+ * matched on (rendered as a richer row). Defined here — a neutral module — so both the row component
+ * and the chat-message type can reference it without a circular import.
+ */
+export interface CandidateItem {
+  patient: PatientDetail;
+  match?: ConditionMatch;
 }
 
 export class ApiError extends Error {
@@ -219,15 +240,19 @@ export function postSelectGroup(
 }
 
 /**
- * Ask a cohort-scoped question. `token` is the session credential (required) and is a separate
- * argument from the body payload precisely because it's transport/auth, not request data — it's
- * sent as the Basic auth header, never in the body. The backend derives the active cohort from the
- * token (never the body), so the client cannot ask outside its group. `history` is client-supplied
- * (stateless backend) to resolve follow-up references.
+ * The one chat call. `token` is the session credential (required) and is a separate argument from
+ * the body precisely because it's transport/auth, not request data — it's sent as the Basic auth
+ * header, never in the body. The backend derives the active cohort from the token (never the body),
+ * so the client cannot ask outside its group. `history` is client-supplied (stateless backend) to
+ * resolve follow-up references.
+ *
+ * `patientId` (optional) switches the backend into ANSWER mode: when a patient is already selected,
+ * send its id and the backend answers the question from THAT patient's records (re-verified under
+ * the cohort). Omit it to FIND/search patients.
  */
 export function postQaQuery(
   token: string,
-  body: { question: string; history?: ChatTurn[] },
+  body: { question: string; history?: ChatTurn[]; patientId?: string },
 ): Promise<QaResult> {
   return postJson<QaResult>('/qa/query', body, token);
 }

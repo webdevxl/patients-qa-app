@@ -183,7 +183,7 @@ export interface PatientQaExtractor {
 export const PATIENT_QA_EXTRACTOR = Symbol('PATIENT_QA_EXTRACTOR');
 
 /** Pull token usage off the raw AIMessage (`usage_metadata`), if present. */
-function readUsage(raw: BaseMessage): ExtractionUsage | undefined {
+export function readUsage(raw: BaseMessage): ExtractionUsage | undefined {
   const usage = (raw as AIMessage).usage_metadata;
   if (!usage) return undefined;
   return {
