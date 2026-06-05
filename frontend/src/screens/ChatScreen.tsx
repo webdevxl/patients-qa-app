@@ -19,13 +19,14 @@ import { Screen } from '../components/Screen';
 import { Chip } from '../components/Chip';
 import { Composer } from '../components/Composer';
 import { MessageBubble, type ChatMessage } from '../components/MessageBubble';
-import { PatientCard } from '../components/PatientCard';
-import { CandidateRow, type CandidateItem } from '../components/CandidateRow';
+import { PatientSummaryCard } from '../components/PatientSummaryCard';
+import { PatientDetailModal } from '../components/PatientDetailModal';
 import {
   postQaQuery,
   ApiError,
   type PatientDetail,
   type ChatTurn,
+  type CandidateItem,
 } from '../api/client';
 import { cohortMeta } from '../domain/cohorts';
 import { cohortTheme, palette, radius } from '../theme/palette';
@@ -118,6 +119,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
   const [pending, setPending] = useState(false);
   const [mode, setMode] = useState<Mode>('search');
   const [activePatient, setActivePatient] = useState<PatientDetail | null>(null);
+  // The patient whose full record is open in the detail modal (null = closed). Independent of the
+  // active (pinned) patient: you can peek any candidate's record without committing to ask about them.
+  const [detailPatient, setDetailPatient] = useState<PatientDetail | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: nextId(),
@@ -150,15 +154,19 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
       )
       .filter((t): t is ChatTurn => t !== null);
 
-  /** Pin a patient and enter the ASK phase: templated brief + full record card, no backend call. */
+  /**
+   * Pin a patient and enter the ASK phase: a templated brief, no backend call. We don't re-render the
+   * full record inline — the active-patient bar (tap to open) and the result card above both lead to
+   * the detail modal, so the transcript stays compact.
+   */
   const selectPatient = (patient: PatientDetail) => {
     setActivePatient(patient);
     setMode('patient');
+    setDetailPatient(null);
     append({
       id: nextId(),
       role: 'assistant',
       text: buildPatientBrief(patient),
-      patients: [patient],
       // Goes into history so the answerer has context for "what about his allergies?" follow-ups.
       contextSummary: `Now answering about ${fullName(patient)} (id ${patient.id}).`,
     });
@@ -183,7 +191,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
     scrollToEnd();
   };
 
-  // Route a FIND response: 0 → fallback, 1 → auto-select, many → disambiguation list.
+  // Route a FIND response: 0 → fallback; otherwise render every hit (one or many) as the same
+  // minimized card. A single hit is NOT auto-expanded — it gets the same two-action card, so the
+  // clinician chooses to peek the record or start asking. Many hits hide the composer (force a pick).
   const handleFindResult = (result: Awaited<ReturnType<typeof postQaQuery>>) => {
     const items: CandidateItem[] = result.matches
       ? result.matches.map((m) => ({ patient: m.patient, match: m }))
@@ -198,20 +208,22 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
       });
       return;
     }
-    if (items.length === 1) {
-      selectPatient(items[0].patient);
-      return;
-    }
+
+    const many = items.length > 1;
     append({
       id: nextId(),
       role: 'assistant',
-      text: `I found ${items.length} patients — which one do you want information for?`,
+      text: many
+        ? `I found ${items.length} patients — open a record, or tap Ask to choose one.`
+        : 'I found a match — view the record, or tap Ask to start asking about them.',
       candidates: items,
-      contextSummary: `Found ${items.length} candidates: ${items
-        .map((i) => fullName(i.patient))
-        .join(', ')}.`,
+      contextSummary: many
+        ? `Found ${items.length} candidates: ${items.map((i) => fullName(i.patient)).join(', ')}.`
+        : `Found 1 candidate: ${fullName(items[0].patient)}.`,
     });
-    setMode('choosing');
+    // Many → force a pick (composer hidden by 'choosing'). One → leave search open so the user can
+    // act on the card or refine the query.
+    setMode(many ? 'choosing' : 'search');
   };
 
   // Route an ASK response: grounded answer (+ confidence/citations) or the safe fallback.
@@ -344,13 +356,27 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
           borderBottomWidth={1}
           borderBottomColor={palette.hairline}
         >
-          <Ionicons name="person-circle" size={18} color={accent} />
-          <Text fontSize={13} fontWeight="600" color={palette.label} flex={1} numberOfLines={1}>
-            {fullName(activePatient)}
-            <Text fontSize={13} fontWeight="400" color={palette.secondaryLabel}>
-              {'  ·  '}Group {activePatient.group}
+          {/* Tap the identity to re-open this patient's full record in the modal. */}
+          <XStack
+            flex={1}
+            alignItems="center"
+            gap={8}
+            onPress={() => setDetailPatient(activePatient)}
+            accessibilityRole="button"
+            accessibilityLabel={`View ${fullName(activePatient)}'s record`}
+            cursor="pointer"
+            animation="quick"
+            pressStyle={{ opacity: 0.6 }}
+          >
+            <Ionicons name="person-circle" size={18} color={accent} />
+            <Text fontSize={13} fontWeight="600" color={palette.label} flex={1} numberOfLines={1}>
+              {fullName(activePatient)}
+              <Text fontSize={13} fontWeight="400" color={palette.secondaryLabel}>
+                {'  ·  '}Group {activePatient.group}
+              </Text>
             </Text>
-          </Text>
+            <Ionicons name="chevron-forward" size={15} color={palette.tertiaryLabel} />
+          </XStack>
           <XStack
             onPress={backToSearch}
             accessibilityRole="button"
@@ -388,36 +414,37 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
           {messages.map((m) => (
             <React.Fragment key={m.id}>
               <MessageBubble message={m} accent={accent} />
-              {m.patients?.map((p) => (
-                <PatientCard key={p.id} patient={p} accent={accent} />
-              ))}
               {m.candidates?.length ? (
                 <YStack>
                   {m.candidates.map((item) => (
-                    <CandidateRow
+                    <PatientSummaryCard
                       key={item.patient.id}
-                      item={item}
+                      patient={item.patient}
+                      match={item.match}
                       accent={accent}
-                      onPress={() => chooseCandidate(item)}
+                      onDetails={() => setDetailPatient(item.patient)}
+                      onAsk={() => chooseCandidate(item)}
                     />
                   ))}
-                  {/* Escape hatch: none of these → back to searching. */}
-                  <XStack
-                    marginHorizontal={16}
-                    marginTop={8}
-                    paddingVertical={11}
-                    justifyContent="center"
-                    onPress={backToSearch}
-                    accessibilityRole="button"
-                    accessibilityLabel="None of these — search again"
-                    cursor="pointer"
-                    animation="quick"
-                    pressStyle={{ opacity: 0.6 }}
-                  >
-                    <Text fontSize={13} fontWeight="600" color={accent}>
-                      None of these — search again
-                    </Text>
-                  </XStack>
+                  {/* Escape hatch for disambiguation (many hits): none of these → back to searching. */}
+                  {m.candidates.length > 1 ? (
+                    <XStack
+                      marginHorizontal={16}
+                      marginTop={8}
+                      paddingVertical={11}
+                      justifyContent="center"
+                      onPress={backToSearch}
+                      accessibilityRole="button"
+                      accessibilityLabel="None of these — search again"
+                      cursor="pointer"
+                      animation="quick"
+                      pressStyle={{ opacity: 0.6 }}
+                    >
+                      <Text fontSize={13} fontWeight="600" color={accent}>
+                        None of these — search again
+                      </Text>
+                    </XStack>
+                  ) : null}
                 </YStack>
               ) : null}
             </React.Fragment>
@@ -478,7 +505,7 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
             justifyContent="center"
           >
             <Text fontSize={13} color={palette.secondaryLabel}>
-              Select a patient above to continue
+              Tap a patient above — View record to peek, or Ask to choose them
             </Text>
           </XStack>
         ) : (
@@ -496,6 +523,13 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
           />
         )}
       </KeyboardAvoidingView>
+
+      {/* Full-record detail — opened from any result card or the active-patient bar. */}
+      <PatientDetailModal
+        patient={detailPatient}
+        accent={accent}
+        onClose={() => setDetailPatient(null)}
+      />
     </Screen>
   );
 }
