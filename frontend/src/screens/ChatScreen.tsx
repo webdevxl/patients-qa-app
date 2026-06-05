@@ -28,17 +28,22 @@ interface ChatScreenProps {
   onSwitchCohort: () => void;
 }
 
-// Four starter prompts — one per patient-lookup path — each seeded with real values from the
-// seeded DB. `label` is what the chip shows and ends with the expected patient in [brackets]
-// as a built-in test oracle ("tapping this should resolve to THIS patient"). `text` is the
-// clean question sent to the backend — it never carries the bracketed answer.
+// Starter prompts — each seeded with real values from the seeded DB. `label` is what the chip
+// shows and ends with a built-in test oracle in [brackets] (the patient it should resolve to,
+// or — for the multi-result allergy searches — how many patients match). `text` is the clean
+// question sent to the backend — it never carries the bracketed answer.
 //
 // Heads-up: the backend `find_patient` tool resolves only by name or UUID today, so prompts 3 & 4
 // (by ICD-10 condition code / by medicine name) currently return the safe fallback — the bracketed
 // name documents the patient they SHOULD resolve to once that lookup is added.
 //
+// Prompts 5–7 exercise the semantic ALLERGY search (find_patients_by_condition's allergyQuery
+// arg): the allergen is embedded and cosine-matched against the canonical allergen vocabulary,
+// returning the top-matching patients (capped at 5). Counts below are total patients with that
+// allergen in the data.
+//
 // Cohort-agnostic: isolation is currently off (the agent searches every patient), so the same
-// four prompts are shown for whichever group is selected and resolve regardless of A/B.
+// prompts are shown for whichever group is selected and resolve regardless of A/B.
 const SUGGESTIONS: { label: string; text: string }[] = [
   {
     // 1) By full name
@@ -60,6 +65,21 @@ const SUGGESTIONS: { label: string; text: string }[] = [
     label: 'Find the patient taking Carvedilol  [Jarrod Whitley]',
     text: 'Find the patient taking Carvedilol',
   },
+  {
+    // 5) By allergy — semantic allergen search
+    label: 'Find patients allergic to penicillin  [top 5 of 13]',
+    text: 'Find patients allergic to penicillin',
+  },
+  {
+    // 6) By allergy — semantic allergen search
+    label: 'Find patients allergic to sulfa antibiotics  [top 5 of 10]',
+    text: 'Find patients allergic to sulfa antibiotics',
+  },
+  {
+    // 7) By allergy — semantic allergen search
+    label: 'Find patients allergic to codeine  [8 patients]',
+    text: 'Find patients allergic to codeine',
+  },
 ];
 
 let messageSeq = 0;
@@ -75,10 +95,19 @@ function introText(patients: PatientDetail[]): string {
   return `Found ${patients.length} matching patients — showing each record below. Refine by full name or patient ID to narrow it down.`;
 }
 
-// Lead-in line shown above the condition-search match cards.
+// Lead-in line shown above the semantic-search match cards. The same tool serves condition and
+// allergy queries (and both at once), so the wording adapts to what the results matched on.
 function conditionIntro(matches: ConditionMatch[]): string {
   const n = matches.length;
-  return `Found ${n} patient${n === 1 ? '' : 's'} with a matching diagnosis — each shown below with its ICD-10 code. Ask about one by name for the full record.`;
+  const hasCondition = matches.some((m) => m.matchedCondition);
+  const hasAllergy = matches.some((m) => m.matchedAllergy);
+  const what =
+    hasCondition && hasAllergy
+      ? 'diagnosis and allergy'
+      : hasAllergy
+        ? 'allergy'
+        : 'diagnosis';
+  return `Found ${n} patient${n === 1 ? '' : 's'} with a matching ${what} — each shown below. Ask about one by name for the full record.`;
 }
 
 export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {

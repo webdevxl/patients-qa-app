@@ -94,16 +94,25 @@ export interface PatientDetail {
 }
 
 /**
- * One patient surfaced by the semantic condition search (find_patients_by_condition).
- * Carries the patient's COMPLETE record (so the detail view renders on tap without another
- * request) plus the diagnosis they matched on. Mirrors the backend ConditionMatch
+ * One patient surfaced by the semantic search (find_patients_by_condition — which serves both
+ * condition and allergy queries). Carries the patient's COMPLETE record (so the detail view
+ * renders on tap without another request) plus what they matched on. Exactly one of
+ * `matchedCondition` / `matchedAllergy` is set per match. Mirrors the backend ConditionMatch
  * (backend/src/agents/tools/find-patients-by-condition.tool.ts).
  */
 export interface ConditionMatch {
   patient: PatientDetail;
-  matchedCondition: {
+  /** Set for condition searches — the matched ICD-10 diagnosis. */
+  matchedCondition?: {
     icd10Code: string;
     icd10Description: string;
+    /** Cosine similarity in [-1, 1]; higher = closer. */
+    similarity: number;
+  };
+  /** Set for allergy searches — the matched canonical allergen. */
+  matchedAllergy?: {
+    canonicalName: string;
+    category: string | null;
     /** Cosine similarity in [-1, 1]; higher = closer. */
     similarity: number;
   };

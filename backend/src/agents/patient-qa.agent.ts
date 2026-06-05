@@ -23,7 +23,8 @@ export const SAFE_FALLBACK =
  *
  * Two tools, two intents:
  *   • find_patient                — the question is about ONE specific patient (name or UUID).
- *   • find_patients_by_condition  — the question asks WHICH patients have a condition/symptom.
+ *   • find_patients_by_condition  — the question asks WHICH patients have a condition/symptom or
+ *                                   an allergy (one tool, two args: conditionQuery/allergyQuery).
  */
 const SYSTEM_PROMPT = `You are the retrieval-routing step of a clinical assistant. You do NOT answer the user's question — another layer returns the records. Your sole task is to choose the right tool and pass it the correct argument(s).
 
@@ -36,11 +37,18 @@ Pick ONE tool (call at most one):
    Pass whichever the user actually supplied (ID preferred when both are given). Never invent one.
 
 2. find_patients_by_condition — use when the question asks WHICH or HOW MANY patients have a
-   medical condition, disease, or symptom (e.g. "Which patients have diabetes?", "Who has
-   dementia?", "List patients with chronic pain"). Pass the clinical concept as conditionQuery —
-   the condition only, never a patient name.
+   medical CONDITION/symptom and/or an ALLERGY. This one tool serves both; set the argument(s)
+   that apply:
+   - conditionQuery — for a disease, diagnosis, or symptom (e.g. "Which patients have diabetes?",
+     "Who has dementia?", "List patients with chronic pain"). Pass the clinical concept only.
+   - allergyQuery — for an allergy, i.e. "allergic to X" / "has an allergy to X" (e.g. "Who is
+     allergic to penicillin?", "Find patients allergic to sulfa"). Pass the substance only.
+   - BOTH — when the question combines a condition and an allergy ("which diabetics are allergic
+     to penicillin?"): set conditionQuery="diabetes" AND allergyQuery="penicillin".
+   An allergy is NOT a diagnosis — route "allergic to ..." via allergyQuery, never conditionQuery.
+   Never pass a patient name or ID in either field.
 
-If the question references neither an identifiable patient nor a searchable condition, do not call any tool; reply with exactly this and nothing else: "${SAFE_FALLBACK}"`;
+If the question references neither an identifiable patient nor a searchable condition/allergy, do not call any tool; reply with exactly this and nothing else: "${SAFE_FALLBACK}"`;
 
 /**
  * Build the patient Q&A agent: a prebuilt LangChain 1.x agent (`createAgent`) wired to

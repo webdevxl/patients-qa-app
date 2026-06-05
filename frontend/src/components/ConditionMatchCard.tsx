@@ -1,9 +1,10 @@
-// Compact result widget for the semantic condition search (find_patients_by_condition).
+// Compact result widget for the semantic search (find_patients_by_condition, which serves both
+// condition and allergy queries).
 //
-// Unlike PatientCard (the full record for a single resolved patient), a condition search
-// returns many patients at once — so each is shown as a small, scannable card: who they are
-// and the single ICD-10 diagnosis they matched on, with a confidence badge. Deliberately
-// short — drill into any patient by asking about them by name.
+// Unlike PatientCard (the full record for a single resolved patient), these searches return
+// many patients at once — so each is shown as a small, scannable card: who they are and the
+// single thing they matched on (an ICD-10 diagnosis, or a canonical allergen), with a
+// confidence badge. Deliberately short — drill into any patient by asking about them by name.
 import React from 'react';
 import { XStack, YStack, Text } from 'tamagui';
 import { Ionicons } from '@expo/vector-icons';
@@ -35,7 +36,7 @@ export function ConditionMatchCard({
   /** Tap to expand into the full patient record (opens PatientDetailModal). */
   onPress?: () => void;
 }) {
-  const { patient, matchedCondition: c, confidence } = match;
+  const { patient, matchedCondition, matchedAllergy, confidence } = match;
   const cc = confidenceColor[confidence];
   const displayName =
     `${patient.nameFirst ?? ''} ${patient.nameLast ?? ''}`.trim() ||
@@ -75,7 +76,7 @@ export function ConditionMatchCard({
         </Text>
       </YStack>
 
-      {/* Identity + matched diagnosis */}
+      {/* Identity + matched diagnosis and/or allergy */}
       <YStack flex={1} gap={3}>
         <XStack alignItems="center" gap={8}>
           <Text
@@ -87,6 +88,9 @@ export function ConditionMatchCard({
             numberOfLines={1}
           >
             {displayName}
+          </Text>
+          <Text fontSize={12} color={palette.tertiaryLabel}>
+            Group {group}
           </Text>
           <XStack
             paddingHorizontal={8}
@@ -100,24 +104,43 @@ export function ConditionMatchCard({
           </XStack>
         </XStack>
 
-        <XStack alignItems="center" gap={6}>
-          <Ionicons name="pulse" size={13} color={accent} />
-          <Text fontSize={13} fontWeight="700" color={palette.label}>
-            {c.icd10Code}
-          </Text>
-          <Text
-            flex={1}
-            fontSize={13}
-            color={palette.secondaryLabel}
-            letterSpacing={-0.1}
-            numberOfLines={1}
-          >
-            {c.icd10Description}
-          </Text>
-          <Text fontSize={12} color={palette.tertiaryLabel}>
-            Group {group}
-          </Text>
-        </XStack>
+        {/* Matched diagnosis (condition search). */}
+        {matchedCondition ? (
+          <XStack alignItems="center" gap={6}>
+            <Ionicons name="pulse" size={13} color={accent} />
+            <Text fontSize={13} fontWeight="700" color={palette.label}>
+              {matchedCondition.icd10Code}
+            </Text>
+            <Text
+              flex={1}
+              fontSize={13}
+              color={palette.secondaryLabel}
+              letterSpacing={-0.1}
+              numberOfLines={1}
+            >
+              {matchedCondition.icd10Description}
+            </Text>
+          </XStack>
+        ) : null}
+
+        {/* Matched allergen (allergy search). */}
+        {matchedAllergy ? (
+          <XStack alignItems="center" gap={6}>
+            <Ionicons name="medkit" size={13} color={accent} />
+            <Text fontSize={13} fontWeight="700" color={palette.label}>
+              {matchedAllergy.canonicalName}
+            </Text>
+            <Text
+              flex={1}
+              fontSize={13}
+              color={palette.secondaryLabel}
+              letterSpacing={-0.1}
+              numberOfLines={1}
+            >
+              {matchedAllergy.category ?? 'Allergy'}
+            </Text>
+          </XStack>
+        ) : null}
       </YStack>
 
       {/* Affordance: tap to open the full record */}
