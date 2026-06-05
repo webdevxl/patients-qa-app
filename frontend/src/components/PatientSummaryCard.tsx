@@ -169,7 +169,6 @@ function CardAction({
       onPress={disabled ? undefined : onPress}
       accessibilityRole="button"
       accessibilityLabel={label}
-      accessibilityState={{ disabled: !!disabled }}
       cursor={disabled ? 'default' : 'pointer'}
       animation="quick"
       pressStyle={disabled ? undefined : { opacity: 0.85, scale: 0.98 }}
@@ -190,6 +189,7 @@ export function PatientSummaryCard({
   match,
   onDetails,
   onAsk,
+  askDisabled,
 }: {
   patient: PatientDetail;
   accent: string;
@@ -363,6 +363,7 @@ export function PatientSummaryCard({
               onPress={onAsk}
               accent={accent}
               variant="primary"
+              disabled={askDisabled}
             />
           ) : null}
         </XStack>

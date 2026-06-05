@@ -20,6 +20,7 @@ import { Chip } from '../components/Chip';
 import { Composer } from '../components/Composer';
 import { MessageBubble, type ChatMessage } from '../components/MessageBubble';
 import { PatientSummaryCard } from '../components/PatientSummaryCard';
+import { PinnedPatientCard } from '../components/PinnedPatientCard';
 import { PatientDetailModal } from '../components/PatientDetailModal';
 import {
   postQaQuery,
@@ -29,7 +30,7 @@ import {
   type CandidateItem,
 } from '../api/client';
 import { cohortMeta } from '../domain/cohorts';
-import { cohortTheme, palette, radius } from '../theme/palette';
+import { cohortTheme, palette } from '../theme/palette';
 import type { CohortGroup } from '../theme/palette';
 
 interface ChatScreenProps {
@@ -175,6 +176,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
 
   /** Tap a candidate row: it reads as if the user sent that patient's name, then we select by id. */
   const chooseCandidate = (item: CandidateItem) => {
+    // A patient is already pinned — ignore further picks so the chat stays scoped to that one.
+    // (The card's Ask button is disabled in this state; this is just defense in depth.)
+    if (activePatient) return;
     append({ id: nextId(), role: 'user', text: fullName(item.patient) });
     selectPatient(item.patient);
   };
@@ -331,72 +335,15 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         </XStack>
       </XStack>
 
-      {/* Always-visible scope banner — the safety invariant, made visible */}
-      <XStack
-        alignItems="center"
-        gap={6}
-        paddingHorizontal={16}
-        paddingVertical={7}
-        backgroundColor={cohortTheme[group].tint}
-      >
-        <Ionicons name="shield-checkmark" size={13} color={accent} />
-        <Text fontSize={12} color={accent} fontWeight="500" flex={1} letterSpacing={-0.1}>
-          {meta.label} only · cross-cohort access is blocked & logged
-        </Text>
-      </XStack>
-
-      {/* Active-patient bar — visible in the ASK phase so the scope (this one patient) is legible. */}
+      {/* Pinned patient card — the active scope in the ASK phase: identity + at-a-glance counts,
+          tap to open the full record, Change to pick another. The same result card, minimized. */}
       {mode === 'patient' && activePatient ? (
-        <XStack
-          alignItems="center"
-          gap={8}
-          paddingHorizontal={16}
-          paddingVertical={8}
-          backgroundColor={palette.surface}
-          borderBottomWidth={1}
-          borderBottomColor={palette.hairline}
-        >
-          {/* Tap the identity to re-open this patient's full record in the modal. */}
-          <XStack
-            flex={1}
-            alignItems="center"
-            gap={8}
-            onPress={() => setDetailPatient(activePatient)}
-            accessibilityRole="button"
-            accessibilityLabel={`View ${fullName(activePatient)}'s record`}
-            cursor="pointer"
-            animation="quick"
-            pressStyle={{ opacity: 0.6 }}
-          >
-            <Ionicons name="person-circle" size={18} color={accent} />
-            <Text fontSize={13} fontWeight="600" color={palette.label} flex={1} numberOfLines={1}>
-              {fullName(activePatient)}
-              <Text fontSize={13} fontWeight="400" color={palette.secondaryLabel}>
-                {'  ·  '}Group {activePatient.group}
-              </Text>
-            </Text>
-            <Ionicons name="chevron-forward" size={15} color={palette.tertiaryLabel} />
-          </XStack>
-          <XStack
-            onPress={backToSearch}
-            accessibilityRole="button"
-            accessibilityLabel="Change patient"
-            animation="quick"
-            pressStyle={{ opacity: 0.6 }}
-            cursor="pointer"
-            alignItems="center"
-            gap={4}
-            paddingVertical={4}
-            paddingHorizontal={8}
-            borderRadius={radius.chip}
-            backgroundColor={cohortTheme[group].tint}
-          >
-            <Ionicons name="swap-horizontal" size={14} color={accent} />
-            <Text fontSize={13} fontWeight="600" color={accent}>
-              Change
-            </Text>
-          </XStack>
-        </XStack>
+        <PinnedPatientCard
+          patient={activePatient}
+          accent={accent}
+          onOpenRecord={() => setDetailPatient(activePatient)}
+          onChange={backToSearch}
+        />
       ) : null}
 
       <KeyboardAvoidingView
@@ -424,6 +371,8 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
                       accent={accent}
                       onDetails={() => setDetailPatient(item.patient)}
                       onAsk={() => chooseCandidate(item)}
+                      // Once a patient is pinned, every card's Ask is inert — to switch, use "Change".
+                      askDisabled={!!activePatient}
                     />
                   ))}
                   {/* Escape hatch for disambiguation (many hits): none of these → back to searching. */}
