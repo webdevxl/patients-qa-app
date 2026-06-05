@@ -54,6 +54,53 @@ export const observationFilterSchema = z.object({
 export type ObservationFilter = z.infer<typeof observationFilterSchema>;
 
 /**
+ * Structured filter for a "which patients TAKE drug X" search, optionally narrowed by dose, form
+ * and route. There is no medication vocabulary table or embeddings: a prescription's full text
+ * (`patient_medication.description`, e.g. "Acetaminophen 325 MG Oral Tablet Tylenol") already
+ * concatenates name + dose + release + route + form + brand, so every attribute is matched as a
+ * co-located substring of that one column (plus `generic_name` for the name). The synonym work —
+ * brand↔generic ("Tylenol"↔"acetaminophen"), phrasing ("by mouth"→Oral, "pill"→Tablet) — is done
+ * by the extractor LLM (already in the pipeline), so retrieval stays deterministic exact ILIKE.
+ * Shared so the extractor (`.nullable()`) and the tool schema (`.optional()`) stay in lockstep.
+ */
+export const medicationFilterSchema = z.object({
+  names: z
+    .array(z.string())
+    .describe(
+      'The drug the patient takes, PLUS its brand/generic synonyms for the SAME drug ' +
+        '("Tylenol" => ["Tylenol","acetaminophen"]; "Lasix" => ["Lasix","furosemide"]). These are ' +
+        'OR-matched, so include every common name of the one drug. NEVER a therapeutic class — ' +
+        'for "painkillers"/"antibiotics"/"blood thinners" leave medicationFilter null. At least one term.',
+    ),
+  doseText: z
+    .string()
+    .nullable()
+    .describe(
+      'The dose EXACTLY as printed on a label: number, a space, then the uppercase unit, e.g. ' +
+        '"325 MG", "0.05 MG", "10 MEQ", "50 MCG". Convert the user\'s wording ("325 milligrams" => ' +
+        '"325 MG", "half a gram" => "500 MG"). Null when no dose is specified.',
+    ),
+  form: z
+    .string()
+    .nullable()
+    .describe(
+      'Dosage form, EXACTLY one of: Tablet, Capsule, Solution, Suspension, Suppository, Cream, ' +
+        'Ointment, Gel, Lotion, Spray, Inhaler. Map synonyms ("pill"/"tab" => Tablet). Null when ' +
+        'the form is not specified.',
+    ),
+  route: z
+    .string()
+    .nullable()
+    .describe(
+      'Route of administration, EXACTLY one of: Oral, Injection, Ophthalmic, Topical, Rectal, ' +
+        'Inhalation, Transdermal, Nasal. Map synonyms ("by mouth" => Oral, "shot"/"IV" => ' +
+        'Injection, "eye" => Ophthalmic, "patch" => Transdermal). Null when not specified.',
+    ),
+});
+
+export type MedicationFilter = z.infer<typeof medicationFilterSchema>;
+
+/**
  * THE single patient-retrieval tool. It resolves patients two ways and the caller need not choose
  * between two tools — `findPatients` routes internally (identity wins):
  *   • by IDENTITY  — patientId and/or name → exact DB lookup, returns FULL records (`patients`).
@@ -100,6 +147,14 @@ export const findPatientsToolSchema = z.object({
         "lbs' ⇒ { metric: 'Weight', operator: 'gt', value: 200 }. Combine with conditionQuery/" +
         "allergyQuery to intersect ('diabetics with heart rate over 100').",
     ),
+  medicationFilter: medicationFilterSchema
+    .optional()
+    .describe(
+      "Patients TAKING a drug ACROSS the cohort, optionally narrowed by dose/form/route " +
+        "('who is on Tylenol?' ⇒ { names: ['Tylenol','acetaminophen'] }; 'injectable insulin' ⇒ " +
+        "{ names: ['insulin'], route: 'Injection' }). Combine with condition/allergy/observation " +
+        "to intersect ('diabetics on metformin').",
+    ),
 });
 
 export type FindPatientsToolInput = z.infer<typeof findPatientsToolSchema>;
@@ -114,6 +169,7 @@ export interface FindPatientsInput {
   conditionQuery?: string | null;
   allergyQuery?: string | null;
   observationFilter?: ObservationFilter | null;
+  medicationFilter?: MedicationFilter | null;
 }
 
 // ── Per-record detail types. These mirror the Prisma models 1:1 (minus the internal
@@ -242,6 +298,19 @@ export interface ConditionMatch {
     unit: string | null;
     recordedTime: string | null;
   };
+  /**
+   * The prescription that satisfied a medication filter (set for medication searches).
+   * Deterministic — the prescription text either contains the search terms or it doesn't.
+   * `description` is the primary citation (what they take); `directions` answers "how often".
+   */
+  matchedMedication?: {
+    description: string | null;
+    genericName: string | null;
+    strength: string | null;
+    strengthUnit: string | null;
+    directions: string | null;
+    narcotic: boolean | null;
+  };
   confidence: 'High' | 'Medium' | 'Low';
 }
 
@@ -259,6 +328,8 @@ export interface FindPatientsResult {
     allergyQuery?: string;
     /** Human-readable measurement filter, e.g. "Weight > 200 Lbs". */
     observation?: string;
+    /** Human-readable medication filter, e.g. "Tylenol/acetaminophen, 325 MG, Oral Tablet". */
+    medication?: string;
   };
   matchCount: number;
   patients?: PatientDetail[];
@@ -428,6 +499,7 @@ interface Candidate {
   matchedCondition?: ConditionMatch['matchedCondition'];
   matchedAllergy?: ConditionMatch['matchedAllergy'];
   matchedObservation?: ConditionMatch['matchedObservation'];
+  matchedMedication?: ConditionMatch['matchedMedication'];
 }
 
 function toConfidence(similarity: number): ConditionMatch['confidence'] {
@@ -556,6 +628,125 @@ async function findObservationMatches(
   return out;
 }
 
+/** Raw row from the medication filter query (one representative prescription per matching patient). */
+interface MedicationRankRow {
+  patientId: string;
+  description: string | null;
+  genericName: string | null;
+  strength: string | null;
+  strengthUnit: string | null;
+  directions: string | null;
+  narcotic: boolean | null;
+}
+
+/** Build a human-readable summary of a medication filter, e.g. "Tylenol/acetaminophen, 325 MG, Oral Tablet". */
+function describeMedication(f: MedicationFilter): string {
+  return [f.names.join('/'), f.doseText, f.route, f.form].filter(Boolean).join(', ');
+}
+
+/**
+ * Canonical route/form value → the substring STEM that actually appears in `description`. The
+ * extractor emits a clean canonical token ("Injection", "Inhalation"), but the prescription text
+ * uses inflected forms ("Injectable Solution", "Pen Injector"; "Inhalation"/"Inhaler"). Matching the
+ * stem (`Inject`, `Inhal`, `Suppositor`) catches every inflection without over-narrowing. Unknown
+ * tokens (the field is a free string, not a hard enum) fall back to matching the token verbatim.
+ */
+const ROUTE_MATCH: Record<string, string> = {
+  Oral: 'Oral',
+  Injection: 'Inject',
+  Ophthalmic: 'Ophthalmic',
+  Topical: 'Topical',
+  Rectal: 'Rectal',
+  Inhalation: 'Inhal',
+  Transdermal: 'Transdermal',
+  Nasal: 'Nasal',
+};
+const FORM_MATCH: Record<string, string> = {
+  Tablet: 'Tablet',
+  Capsule: 'Capsule',
+  Solution: 'Solution',
+  Suspension: 'Suspension',
+  Suppository: 'Suppositor',
+  Cream: 'Cream',
+  Ointment: 'Ointment',
+  Gel: 'Gel',
+  Lotion: 'Lotion',
+  Spray: 'Spray',
+  Inhaler: 'Inhal',
+};
+
+/**
+ * Medication search: DETERMINISTIC "which patients take drug X" lookup, optionally narrowed by
+ * dose/form/route. No embeddings/vocabulary — the prescription's `description` already concatenates
+ * name + dose + release + route + form + brand, so we AND substring (ILIKE) matches against that
+ * single column: an OR-group over the name synonyms (also checking `generic_name`), then one
+ * mandatory ILIKE per supplied dose/form/route token. Returns one entry per matching patient
+ * (their most recently ordered matching prescription).
+ *
+ * Cohort scoping is enforced in the SQL (`AND p."group" = ${group}`) via the patient join —
+ * `patient_medication` has no group column, so this join is the ONLY path to the cohort boundary.
+ * Injection-safe: every search term is a bound parameter (wrapped in `%…%` in JS, never
+ * interpolated as SQL); there are no structural tokens taken from user text.
+ */
+async function findMedicationMatches(
+  prisma: PrismaService,
+  group: CohortGroup,
+  filter: MedicationFilter,
+): Promise<Map<string, NonNullable<ConditionMatch['matchedMedication']>>> {
+  // Name OR-group: any synonym may match the full description OR the (sometimes null) generic name.
+  const nameOr = Prisma.join(
+    filter.names.map(
+      (n) =>
+        Prisma.sql`(m.description ILIKE ${'%' + n + '%'} OR m.generic_name ILIKE ${'%' + n + '%'})`,
+    ),
+    ' OR ',
+  );
+  // Each supplied attribute is an additional constraint that must appear in the description (AND).
+  // Route/form are matched by their description STEM (Injection→"Inject", Inhalation→"Inhal", …) so
+  // inflected wording ("Injectable Solution") still matches; unknown tokens match verbatim.
+  const conds: Prisma.Sql[] = [Prisma.sql`(${nameOr})`];
+  if (filter.doseText)
+    conds.push(Prisma.sql`m.description ILIKE ${'%' + filter.doseText + '%'}`);
+  if (filter.form) {
+    const formToken = FORM_MATCH[filter.form] ?? filter.form;
+    conds.push(Prisma.sql`m.description ILIKE ${'%' + formToken + '%'}`);
+  }
+  if (filter.route) {
+    const routeToken = ROUTE_MATCH[filter.route] ?? filter.route;
+    conds.push(Prisma.sql`m.description ILIKE ${'%' + routeToken + '%'}`);
+  }
+  const predicate = Prisma.join(conds, ' AND ');
+
+  const rows = await prisma.$queryRaw<MedicationRankRow[]>`
+    SELECT DISTINCT ON (p.id)
+      p.id           AS "patientId",
+      m.description  AS "description",
+      m.generic_name AS "genericName",
+      m.strength     AS "strength",
+      m.strength_unit AS "strengthUnit",
+      m.directions   AS "directions",
+      m.narcotic     AS "narcotic"
+    FROM patient_medication m
+    JOIN patient p ON p.id = m.patient_id
+    WHERE p."group" = ${group}
+      AND (${predicate})
+    ORDER BY p.id, m.order_time DESC NULLS LAST
+  `;
+
+  const out = new Map<string, NonNullable<ConditionMatch['matchedMedication']>>();
+  for (const r of rows) {
+    out.set(r.patientId, {
+      description: r.description,
+      genericName: r.genericName,
+      strength: r.strength,
+      strengthUnit: r.strengthUnit,
+      directions: r.directions,
+      narcotic: r.narcotic,
+    });
+  }
+  return out;
+}
+
 /** Identity path: resolve by id/name within the active cohort, return full records. */
 async function findByIdentity(
   prisma: PrismaService,
@@ -575,15 +766,21 @@ async function findByIdentity(
 }
 
 /**
- * Attribute path: search ACROSS patients by condition, allergy, and/or a measurement filter.
+ * Attribute path: search ACROSS patients by condition, allergy, a measurement filter, and/or a
+ * medication filter, in any combination.
  *
- * Flow: embed the condition/allergy query → cosine-rank against the matching vocabulary (the
- * `embedding` pgvector column on `icd_code` / `allergen`) → keep the best match per patient. The
- * condition and allergy searches UNION (a patient surfaced by either appears). An
- * `observationFilter` then applies as an INTERSECTING constraint: with a co-given condition/allergy
- * it keeps only patients who ALSO pass the measurement ("diabetics with heart rate over 100");
- * on its own it returns every patient passing the measurement. Finally the surviving patients'
- * FULL records are fetched in one query.
+ * Two kinds of constraint:
+ *   • FUZZY (condition, allergy): embed the query → cosine-rank against the vocabulary (the
+ *     `embedding` pgvector column on `icd_code` / `allergen`) → keep the best per patient. These
+ *     UNION (a patient surfaced by either appears).
+ *   • DETERMINISTIC (medication, observation): a patient's records either satisfy the predicate or
+ *     not (no embeddings).
+ *
+ * Combination rule (`applyDeterministic`): a deterministic filter INTERSECTS when any prior
+ * constraint was REQUESTED (so "diabetics on metformin" keeps only patients matching both), and
+ * SEEDS the candidate set when it is the first constraint (so "who's on Tylenol?" returns every
+ * patient on the drug). Intersection is commutative, so medication/observation order is irrelevant.
+ * Finally the surviving patients' FULL records are fetched in one query.
  *
  * Cohort scoping is enforced in every SQL statement (`AND p."group" = ${group}`), so no path can
  * surface a patient outside the active cohort.
@@ -595,6 +792,7 @@ async function findByAttribute(
   conditionQuery?: string,
   allergyQuery?: string,
   observationFilter?: ObservationFilter | null,
+  medicationFilter?: MedicationFilter | null,
 ): Promise<ConditionMatch[]> {
   const maxDistance = 1 - SIMILARITY_THRESHOLD;
   const byPatient = new Map<string, Candidate>();
@@ -667,24 +865,48 @@ async function findByAttribute(
     }
   }
 
-  const hasFuzzy = Boolean(conditionQuery || allergyQuery);
+  // `hasCandidates` tracks whether any constraint has been REQUESTED so far — seeded from whether a
+  // fuzzy search ran, NOT from byPatient.size. This matters when a fuzzy search matched nothing:
+  // "diabetics on metformin" with zero diabetes hits must intersect an EMPTY set (→ no results),
+  // not let medication seed and return every metformin patient.
+  let hasCandidates = Boolean(conditionQuery || allergyQuery);
+
+  /**
+   * Fold one deterministic filter's hits into `byPatient`: INTERSECT when a prior constraint was
+   * requested (keep only existing candidates that also pass, annotating them), else SEED (each
+   * passing patient becomes a candidate). Any requested deterministic filter then forces later ones
+   * to intersect, so the filters compose as a logical AND regardless of order.
+   */
+  const applyDeterministic = <T>(
+    hits: Map<string, T>,
+    assign: (c: Candidate, hit: T) => void,
+  ): void => {
+    if (hasCandidates) {
+      for (const [patientId, c] of byPatient) {
+        const hit = hits.get(patientId);
+        if (hit) assign(c, hit);
+        else byPatient.delete(patientId);
+      }
+    } else {
+      for (const [patientId, hit] of hits) assign(upsert(patientId), hit);
+    }
+    hasCandidates = true;
+  };
+
+  // ── Medication filter: deterministic substring (ILIKE) match over the prescription text. ──
+  if (medicationFilter) {
+    const meds = await findMedicationMatches(prisma, group, medicationFilter);
+    applyDeterministic(meds, (c, hit) => {
+      c.matchedMedication = hit;
+    });
+  }
 
   // ── Observation filter: deterministic numeric predicate over the JSONB `data` column. ──
   if (observationFilter) {
     const obs = await findObservationMatches(prisma, group, observationFilter);
-    if (hasFuzzy) {
-      // Intersect: drop fuzzy candidates that fail the measurement; annotate the rest.
-      for (const [patientId, c] of byPatient) {
-        const m = obs.get(patientId);
-        if (m) c.matchedObservation = m;
-        else byPatient.delete(patientId);
-      }
-    } else {
-      // Standalone measurement search: each passing patient becomes a candidate.
-      for (const [patientId, m] of obs) {
-        upsert(patientId).matchedObservation = m;
-      }
-    }
+    applyDeterministic(obs, (c, hit) => {
+      c.matchedObservation = hit;
+    });
   }
 
   const bestSimilarity = (c: Candidate): number =>
@@ -694,7 +916,9 @@ async function findByAttribute(
     );
 
   // Rank by the explicit numeric criterion when a measurement filter ran (most-extreme reading
-  // first; ascending for </<=), otherwise by the strongest similarity hit. Capped at MAX_MATCHES.
+  // first; ascending for </<=), otherwise by the strongest similarity hit. A deterministic-only
+  // match (e.g. medication-only) has no similarity, so candidates tie at -1 and fall through to a
+  // stable id tie-break for reproducible ordering. Capped at MAX_MATCHES.
   const ascending =
     observationFilter?.operator === 'lt' || observationFilter?.operator === 'lte';
   const ranked = [...byPatient.values()]
@@ -702,9 +926,12 @@ async function findByAttribute(
       if (observationFilter) {
         const va = a.matchedObservation?.value ?? Number.NEGATIVE_INFINITY;
         const vb = b.matchedObservation?.value ?? Number.NEGATIVE_INFINITY;
-        return ascending ? va - vb : vb - va;
+        if (va !== vb) return ascending ? va - vb : vb - va;
+        return a.patientId < b.patientId ? -1 : a.patientId > b.patientId ? 1 : 0;
       }
-      return bestSimilarity(b) - bestSimilarity(a);
+      const bySim = bestSimilarity(b) - bestSimilarity(a);
+      if (bySim !== 0) return bySim;
+      return a.patientId < b.patientId ? -1 : a.patientId > b.patientId ? 1 : 0;
     })
     .slice(0, MAX_MATCHES);
   if (ranked.length === 0) return [];
@@ -738,8 +965,8 @@ async function findByAttribute(
             value: Number(c.matchedObservation.value.toFixed(2)),
           }
         : undefined;
-      // A pure measurement match is a deterministic pass ⇒ High; when a fuzzy condition/allergy
-      // is also present, confidence reflects that (the only uncertain part).
+      // A pure deterministic match (measurement and/or medication) is a definite pass ⇒ High; when
+      // a fuzzy condition/allergy is also present, confidence reflects that (the only uncertain part).
       const confidence =
         c.matchedCondition || c.matchedAllergy
           ? toConfidence(bestSimilarity(c))
@@ -749,6 +976,7 @@ async function findByAttribute(
         matchedCondition,
         matchedAllergy,
         matchedObservation,
+        matchedMedication: c.matchedMedication,
         confidence,
       };
     })
@@ -776,21 +1004,29 @@ export async function findPatients(
   const conditionQuery = input.conditionQuery?.trim() || undefined;
   const allergyQuery = input.allergyQuery?.trim() || undefined;
   const observationFilter = input.observationFilter ?? undefined;
+  // Normalize the medication filter: trim/drop blank name terms; with no usable name the filter is
+  // absent (a dose/form/route alone is never a standalone medication search).
+  const medNames =
+    input.medicationFilter?.names?.map((n) => n.trim()).filter(Boolean) ?? [];
+  const medicationFilter: MedicationFilter | undefined = medNames.length
+    ? { ...input.medicationFilter!, names: medNames }
+    : undefined;
   const query = {
     patientId,
     name,
     conditionQuery,
     allergyQuery,
     observation: observationFilter ? describeObservation(observationFilter) : undefined,
+    medication: medicationFilter ? describeMedication(medicationFilter) : undefined,
   };
 
-  // Identity wins: a specific patient beats a co-mentioned condition/allergy/measurement.
+  // Identity wins: a specific patient beats a co-mentioned condition/allergy/measurement/medication.
   if (patientId || name) {
     const patients = await findByIdentity(prisma, group, patientId, name);
     return { query, matchCount: patients.length, patients };
   }
 
-  if (conditionQuery || allergyQuery || observationFilter) {
+  if (conditionQuery || allergyQuery || observationFilter || medicationFilter) {
     const matches = await findByAttribute(
       prisma,
       embeddings,
@@ -798,6 +1034,7 @@ export async function findPatients(
       conditionQuery,
       allergyQuery,
       observationFilter,
+      medicationFilter,
     );
     return { query, matchCount: matches.length, matches };
   }
@@ -827,6 +1064,9 @@ export function createFindPatientsTool(
                       an allergy is NOT a diagnosis. Combine with conditionQuery for both.
                     • observationFilter → patients whose vital/measurement passes a numeric test
                       ("weight over 200 lbs"). Combine with condition/allergy to intersect.
+                    • medicationFilter → patients TAKING a drug, optionally narrowed by dose/form/
+                      route ("who is on Tylenol?", "injectable insulin"). Combine to intersect
+                      ("diabetics on metformin").
                     Identity (id/name) takes priority over the across-patient searches. Pass the
                     clinical concept / substance ONLY in the query fields — never a name or ID
                     there. Returns matchCount 0 when nothing resolves/matches.`,

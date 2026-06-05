@@ -36,8 +36,14 @@ export function ConditionMatchCard({
   /** Tap to expand into the full patient record (opens PatientDetailModal). */
   onPress?: () => void;
 }) {
-  const { patient, matchedCondition, matchedAllergy, matchedObservation, confidence } =
-    match;
+  const {
+    patient,
+    matchedCondition,
+    matchedAllergy,
+    matchedObservation,
+    matchedMedication,
+    confidence,
+  } = match;
   const cc = confidenceColor[confidence];
   const displayName =
     `${patient.nameFirst ?? ''} ${patient.nameLast ?? ''}`.trim() ||
@@ -164,6 +170,51 @@ export function ConditionMatchCard({
                 : ''}
             </Text>
           </XStack>
+        ) : null}
+
+        {/* Matched medication (medication search). Description = what they take;
+            directions = how often. */}
+        {matchedMedication ? (
+          <YStack gap={2}>
+            <XStack alignItems="center" gap={6}>
+              <Ionicons name="medical" size={13} color={accent} />
+              <Text
+                flex={1}
+                fontSize={13}
+                fontWeight="700"
+                color={palette.label}
+                letterSpacing={-0.1}
+                numberOfLines={1}
+              >
+                {matchedMedication.description ??
+                  matchedMedication.genericName ??
+                  'Medication'}
+              </Text>
+              {matchedMedication.narcotic ? (
+                <XStack
+                  paddingHorizontal={6}
+                  paddingVertical={2}
+                  borderRadius={radius.chip}
+                  backgroundColor={`${palette.orange}1A`}
+                >
+                  <Text fontSize={10} fontWeight="700" color={palette.orange}>
+                    Narcotic
+                  </Text>
+                </XStack>
+              ) : null}
+            </XStack>
+            {matchedMedication.directions ? (
+              <Text
+                fontSize={12}
+                color={palette.secondaryLabel}
+                letterSpacing={-0.1}
+                numberOfLines={1}
+                marginLeft={19}
+              >
+                {matchedMedication.directions}
+              </Text>
+            ) : null}
+          </YStack>
         ) : null}
       </YStack>
 

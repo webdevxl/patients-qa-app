@@ -127,6 +127,16 @@ export interface ConditionMatch {
     unit: string | null;
     recordedTime: string | null;
   };
+  /** Set for medication searches — the prescription that matched (drug + dose/form/route). */
+  matchedMedication?: {
+    description: string | null;
+    genericName: string | null;
+    strength: string | null;
+    strengthUnit: string | null;
+    /** Dosing instructions — answers "how often". */
+    directions: string | null;
+    narcotic: boolean | null;
+  };
   confidence: 'High' | 'Medium' | 'Low';
 }
 

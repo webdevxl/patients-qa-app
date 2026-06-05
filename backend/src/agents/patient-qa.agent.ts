@@ -6,7 +6,10 @@ import {
   type BaseMessage,
 } from '@langchain/core/messages';
 import { z } from 'zod';
-import { observationFilterSchema } from './tools/find-patients.tool';
+import {
+  observationFilterSchema,
+  medicationFilterSchema,
+} from './tools/find-patients.tool';
 
 /**
  * Safe fallback string (used verbatim per the spec) for when no patient can be resolved.
@@ -24,7 +27,7 @@ export const SAFE_FALLBACK =
  * The model only ever EXTRACTS these fields — it never decides which retrieval to run and never
  * answers the question. Routing is deterministic code in QaService (identity wins). Constraining
  * the model to this fixed object (vs. free tool-calling / free text) is also the core
- * prompt-injection defense: the only thing the model can emit is these four strings.
+ * prompt-injection defense: the only thing the model can emit is this fixed set of search fields.
  *
  * Fields are `.nullable()` (NOT `.optional()`): @langchain/openai v1's `withStructuredOutput`
  * uses OpenAI's strict structured-outputs mode, where every key must be present — optionality is
@@ -76,6 +79,18 @@ export const extractionSchema = z.object({
         'Set this ALONGSIDE conditionQuery/allergyQuery when both are asked ("diabetics with ' +
         'heart rate over 100"). Null when no measurement comparison is requested.',
     ),
+  medicationFilter: medicationFilterSchema
+    .nullable()
+    .describe(
+      'Set when the message asks which patients TAKE a drug, optionally narrowed by dose/form/' +
+        'route ("who is on Tylenol?" ⇒ { names: ["Tylenol","acetaminophen"] }; "patients on 325 ' +
+        'mg acetaminophen tablets" ⇒ { names: ["acetaminophen","Tylenol"], doseText: "325 MG", ' +
+        'form: "Tablet" }; "injectable insulin" ⇒ { names: ["insulin"], route: "Injection" }). ' +
+        'names MUST list the drug PLUS its brand/generic synonyms for the SAME drug — never a ' +
+        'therapeutic class (for "painkillers"/"antibiotics" leave this null). Set this ALONGSIDE ' +
+        'conditionQuery/allergyQuery/observationFilter when combined ("diabetics on metformin"). ' +
+        'Null when no specific medication is named.',
+    ),
 });
 
 export type Extraction = z.infer<typeof extractionSchema>;
@@ -101,7 +116,7 @@ const MAX_CONTENT_CHARS = 500;
  *   • coerce content to a trimmed, length-capped string,
  *   • keep only the most recent MAX_HISTORY_TURNS.
  * The extractor still prepends its OWN trusted system prompt, so a poisoned history can at most
- * nudge the four extracted fields — it can never replace the instructions or bypass routing.
+ * nudge the extracted search fields — it can never replace the instructions or bypass routing.
  */
 export function sanitizeAndTrim(history: ChatTurn[] | undefined): ChatTurn[] {
   if (!Array.isArray(history)) return [];
@@ -128,8 +143,9 @@ const EXTRACTION_SYSTEM_PROMPT = `You extract structured search parameters from 
 - conditionQuery: a disease, diagnosis, or symptom to search ACROSS patients ("which patients have diabetes?"). The clinical concept only. Leave empty for a specific named patient.
 - allergyQuery: a substance from an "allergic to X" search ACROSS patients ("who is allergic to penicillin?"). The substance only. An allergy is NOT a diagnosis — route "allergic to ..." here, never to conditionQuery. Set BOTH conditionQuery and allergyQuery when the message combines them ("diabetics allergic to penicillin").
 - observationFilter: a numeric comparison over a vital sign / measurement ACROSS patients ("weight over 200 lbs", "heart rate above 100", "oxygen saturation below 90"). metric is one of PainLevel, Weight, Height, BloodPressure, BloodSugar, HeartRate, Temperature, RespiratoryRate, OxygenSaturation; operator is gt/gte/lt/lte/eq/between (value2 only for between); value is the raw number in the metric's NATIVE unit (Lbs, Inches, °F, mg/dL, bpm, mmHg, %, Breaths/min, pain 0–10) — never convert units. For BloodPressure set component to systolic or diastolic (default systolic). Set observationFilter ALONGSIDE conditionQuery/allergyQuery when the message combines them ("diabetics with heart rate over 100"). Leave null when no measurement comparison is asked.
+- medicationFilter: which patients TAKE a drug ("who is on Tylenol?", "patients on 325 mg acetaminophen tablets", "injectable insulin"), optionally narrowed by dose/form/route. names = the drug PLUS its brand/generic synonyms for the SAME drug ("Tylenol" → ["Tylenol","acetaminophen"]); NEVER a therapeutic class (for "painkillers"/"antibiotics" leave medicationFilter null). doseText = the dose as a label prints it (number + space + uppercase unit, e.g. "325 MG"; convert "325 milligrams" → "325 MG"), else null. form = EXACTLY one of Tablet, Capsule, Solution, Suspension, Suppository, Cream, Ointment, Gel, Lotion, Spray, Inhaler ("pill" → Tablet), else null. route = EXACTLY one of Oral, Injection, Ophthalmic, Topical, Rectal, Inhalation, Transdermal, Nasal ("by mouth" → Oral, "shot"/"IV" → Injection, "eye" → Ophthalmic), else null. Set medicationFilter ALONGSIDE conditionQuery/allergyQuery/observationFilter when combined ("diabetics on metformin"). Leave null when no specific medication is named.
 
-If the message identifies no specific patient and asks for no searchable condition, allergy, or measurement, leave every field empty.`;
+If the message identifies no specific patient and asks for no searchable condition, allergy, measurement, or medication, leave every field empty.`;
 
 /** Token usage for one extraction call (best-effort; surfaced for observability). */
 export interface ExtractionUsage {

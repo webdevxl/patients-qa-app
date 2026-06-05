@@ -109,6 +109,7 @@ function conditionIntro(matches: ConditionMatch[]): string {
   if (matches.some((m) => m.matchedCondition)) dims.push('diagnosis');
   if (matches.some((m) => m.matchedAllergy)) dims.push('allergy');
   if (matches.some((m) => m.matchedObservation)) dims.push('measurement');
+  if (matches.some((m) => m.matchedMedication)) dims.push('medication');
   const what =
     dims.length === 0
       ? 'record'

@@ -122,6 +122,7 @@ export class QaService {
       r.query.conditionQuery ? `condition "${r.query.conditionQuery}"` : null,
       r.query.allergyQuery ? `allergy "${r.query.allergyQuery}"` : null,
       r.query.observation ? `measurement ${r.query.observation}` : null,
+      r.query.medication ? `medication ${r.query.medication}` : null,
     ]
       .filter(Boolean)
       .join(' + ');
