@@ -14,7 +14,9 @@
     "db:seed": "prisma db seed",
     "db:reset": "prisma migrate reset --force",
     "db:embed-icd:compute": "ts-node prisma/embed-icd-compute.ts",
-    "db:embed-icd:load": "ts-node prisma/embed-icd-load.ts"
+    "db:embed-icd:load": "ts-node prisma/embed-icd-load.ts",
+    "db:embed-allergen:compute": "ts-node prisma/embed-allergen-compute.ts",
+    "db:embed-allergen:load": "ts-node prisma/embed-allergen-load.ts"
   },
   "prisma": {
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"

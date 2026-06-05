@@ -86,10 +86,15 @@ model PatientAllergy {
 // `allergen_id`. Like `icd_code`, this is a shared vocabulary table; cohort scoping happens
 // on the patient join, not here.
 model Allergen {
-  id            String   @id // deterministic slug, e.g. "penicillin", "sulfa-antibiotics"
-  canonicalName String   @unique @map("canonical_name") // display name, e.g. "Penicillin"
+  id            String                       @id // deterministic slug, e.g. "penicillin", "sulfa-antibiotics"
+  canonicalName String                       @unique @map("canonical_name") // display name, e.g. "Penicillin"
   category      String? // Drug | Food | Other (curated; falls back to the CSV category)
-  createdTime   DateTime @default(now()) @map("created_time") @db.Timestamptz
+  // Semantic embedding of `canonicalName` (pgvector). Like icd_code.embedding: Prisma can't
+  // model pgvector natively, so it's declared Unsupported + nullable and read/written only via
+  // raw SQL by the embed-allergen-* scripts. Nullable so the vocab row exists before its vector
+  // is backfilled. 1536 dims matches OpenAI `text-embedding-3-small` (src/embeddings/embeddings.factory.ts).
+  embedding     Unsupported("vector(1536)")?
+  createdTime   DateTime                     @default(now()) @map("created_time") @db.Timestamptz
 
   allergies PatientAllergy[]
 
