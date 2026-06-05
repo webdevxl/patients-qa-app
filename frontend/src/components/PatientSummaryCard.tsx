@@ -143,12 +143,15 @@ function CardAction({
   onPress,
   accent,
   variant,
+  disabled,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
   onPress: () => void;
   accent: string;
   variant: 'primary' | 'secondary';
+  /** Inert + dimmed: ignores presses and drops the cursor/press affordances. */
+  disabled?: boolean;
 }) {
   const primary = variant === 'primary';
   const fg = primary ? palette.white : palette.label;
@@ -161,12 +164,15 @@ function CardAction({
       justifyContent="center"
       gap={6}
       backgroundColor={primary ? accent : palette.secondarySystemFill}
-      onPress={onPress}
+      opacity={disabled ? 0.4 : 1}
+      disabled={disabled}
+      onPress={disabled ? undefined : onPress}
       accessibilityRole="button"
       accessibilityLabel={label}
-      cursor="pointer"
+      accessibilityState={{ disabled: !!disabled }}
+      cursor={disabled ? 'default' : 'pointer'}
       animation="quick"
-      pressStyle={{ opacity: 0.85, scale: 0.98 }}
+      pressStyle={disabled ? undefined : { opacity: 0.85, scale: 0.98 }}
     >
       <Ionicons name={icon} size={16} color={fg} />
       <Text fontSize={15} fontWeight="600" color={fg} letterSpacing={-0.2}>
@@ -193,6 +199,8 @@ export function PatientSummaryCard({
   onDetails?: () => void;
   /** Hand this patient to the Q&A agent. Omit to hide the "Ask" button. */
   onAsk?: () => void;
+  /** Another patient is already pinned — keep Ask visible but inert so the chat stays scoped. */
+  askDisabled?: boolean;
 }) {
   const yrs = age(patient.dob);
   const subline = [yrs != null ? `${yrs} yrs` : null, patient.gender]
