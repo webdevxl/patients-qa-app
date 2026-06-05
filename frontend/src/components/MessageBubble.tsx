@@ -8,7 +8,7 @@ import React from 'react';
 import { XStack, YStack, Text } from 'tamagui';
 import { Ionicons } from '@expo/vector-icons';
 import { palette, radius, cardShadow } from '../theme/palette';
-import type { PatientDetail } from '../api/client';
+import type { PatientDetail, ConditionMatch } from '../api/client';
 
 export type Role = 'user' | 'assistant';
 export type Confidence = 'High' | 'Medium' | 'Low';
@@ -21,6 +21,8 @@ export interface ChatMessage {
   citations?: string[];
   /** Resolved patient record(s) — rendered as PatientCards beneath the bubble. */
   patients?: PatientDetail[];
+  /** Condition-search hits — rendered as compact ConditionMatchCards beneath the bubble. */
+  matches?: ConditionMatch[];
   /** Marks the safe-fallback / system notices so they can read differently. */
   pending?: boolean;
 }

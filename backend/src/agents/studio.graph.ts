@@ -14,11 +14,16 @@
  */
 import { PrismaClient } from '@prisma/client';
 import type { PrismaService } from '../prisma/prisma.service';
+import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { createPatientQaAgent } from './patient-qa.agent';
 
 // PrismaService adds only Nest lifecycle hooks on top of PrismaClient; the agent's tool uses
 // plain client query methods, so a bare client is a safe structural substitute outside Nest.
 const prisma = new PrismaClient() as unknown as PrismaService;
 
+// EmbeddingsService has no DI dependencies (it builds its own OpenAI client), so a plain
+// `new` is fine outside Nest — same instance the HTTP layer's condition-search tool uses.
+const embeddings = new EmbeddingsService();
+
 // `createAgent` returns a compiled LangGraph graph — Studio renders and runs it directly.
-export const graph = createPatientQaAgent(prisma);
+export const graph = createPatientQaAgent(prisma, embeddings);

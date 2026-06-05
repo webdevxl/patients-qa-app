@@ -1,5 +1,6 @@
 import { tool } from 'langchain';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
 
 /**
@@ -132,6 +133,96 @@ const dateOnly = (d: Date | null): string | null =>
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 
 /**
+ * The full-record `include` shape: every child table, observations capped to the most recent.
+ * Shared so both retrieval tools (find_patient and find_patients_by_condition) return identical
+ * patient payloads.
+ */
+export const patientInclude = {
+  conditions: true,
+  medications: true,
+  allergies: true,
+  observations: { orderBy: { recordedTime: 'desc' }, take: OBSERVATION_LIMIT },
+} satisfies Prisma.PatientInclude;
+
+type PatientWithRecords = Prisma.PatientGetPayload<{ include: typeof patientInclude }>;
+
+/** Map a fully-included Prisma patient to the flat, JSON-ready `PatientDetail` the UI renders. */
+export function toPatientDetail(p: PatientWithRecords): PatientDetail {
+  return {
+    id: p.id,
+    nameFirst: p.nameFirst,
+    nameLast: p.nameLast,
+    dob: dateOnly(p.dob),
+    gender: p.gender,
+    ethnicityDescription: p.ethnicityDescription,
+    legalMailingAddress: p.legalMailingAddress,
+    status: p.status,
+    group: p.group,
+    email: p.email,
+    phone: p.phone,
+    outpatient: p.outpatient,
+    onLeave: p.onLeave,
+    unitDescription: p.unitDescription,
+    floorDescription: p.floorDescription,
+    roomDescription: p.roomDescription,
+    bedDescription: p.bedDescription,
+    admissionTime: iso(p.admissionTime),
+    dischargeTime: iso(p.dischargeTime),
+    deathTime: iso(p.deathTime),
+    revBy: p.revBy,
+    revTime: iso(p.revTime),
+    conditions: p.conditions.map((c) => ({
+      clinicalStatus: c.clinicalStatus,
+      icd10Code: c.icd10Code,
+      icd10Description: c.icd10Description,
+      isPrimaryDiagnosis: c.isPrimaryDiagnosis,
+      onsetDate: dateOnly(c.onsetDate),
+      resolvedDate: dateOnly(c.resolvedDate),
+      createdBy: c.createdBy,
+      createdTime: iso(c.createdTime),
+      revBy: c.revBy,
+      revTime: iso(c.revTime),
+    })),
+    medications: p.medications.map((m) => ({
+      description: m.description,
+      genericName: m.genericName,
+      strength: m.strength,
+      strengthUnit: m.strengthUnit,
+      directions: m.directions,
+      status: m.status,
+      narcotic: m.narcotic,
+      rxNormId: m.rxNormId,
+      startTime: dateOnly(m.startTime),
+      orderTime: iso(m.orderTime),
+      createdTime: iso(m.createdTime),
+      revTime: iso(m.revTime),
+    })),
+    allergies: p.allergies.map((a) => ({
+      allergen: a.allergen,
+      category: a.category,
+      type: a.type,
+      severity: a.severity,
+      reactionType: a.reactionType,
+      reactionSubType: a.reactionSubType,
+      reactionNote: a.reactionNote,
+      clinicalStatus: a.clinicalStatus,
+      onsetDate: dateOnly(a.onsetDate),
+      resolvedDate: dateOnly(a.resolvedDate),
+      createdBy: a.createdBy,
+      createdTime: iso(a.createdTime),
+      revBy: a.revBy,
+      revTime: iso(a.revTime),
+    })),
+    observations: p.observations.map((o) => ({
+      method: o.method,
+      recordedBy: o.recordedBy,
+      recordedTime: iso(o.recordedTime),
+      data: o.data,
+    })),
+  };
+}
+
+/**
  * Build the Prisma `where` for the supplied criteria, precision-first:
  *   1. ID present  -> exact match on `patient.id` (authoritative; short-circuits).
  *   2. else name   -> the name is split into whitespace tokens and every token must appear
@@ -182,89 +273,10 @@ export function createFindPatientTool(prisma: PrismaService) {
         where,
         take: MAX_MATCHES,
         orderBy: [{ nameLast: 'asc' }, { nameFirst: 'asc' }],
-        include: {
-          conditions: true,
-          medications: true,
-          allergies: true,
-          observations: {
-            orderBy: { recordedTime: 'desc' },
-            take: OBSERVATION_LIMIT,
-          },
-        },
+        include: patientInclude,
       });
 
-      const detailed: PatientDetail[] = patients.map((p) => ({
-        id: p.id,
-        nameFirst: p.nameFirst,
-        nameLast: p.nameLast,
-        dob: dateOnly(p.dob),
-        gender: p.gender,
-        ethnicityDescription: p.ethnicityDescription,
-        legalMailingAddress: p.legalMailingAddress,
-        status: p.status,
-        group: p.group,
-        email: p.email,
-        phone: p.phone,
-        outpatient: p.outpatient,
-        onLeave: p.onLeave,
-        unitDescription: p.unitDescription,
-        floorDescription: p.floorDescription,
-        roomDescription: p.roomDescription,
-        bedDescription: p.bedDescription,
-        admissionTime: iso(p.admissionTime),
-        dischargeTime: iso(p.dischargeTime),
-        deathTime: iso(p.deathTime),
-        revBy: p.revBy,
-        revTime: iso(p.revTime),
-        conditions: p.conditions.map((c) => ({
-          clinicalStatus: c.clinicalStatus,
-          icd10Code: c.icd10Code,
-          icd10Description: c.icd10Description,
-          isPrimaryDiagnosis: c.isPrimaryDiagnosis,
-          onsetDate: dateOnly(c.onsetDate),
-          resolvedDate: dateOnly(c.resolvedDate),
-          createdBy: c.createdBy,
-          createdTime: iso(c.createdTime),
-          revBy: c.revBy,
-          revTime: iso(c.revTime),
-        })),
-        medications: p.medications.map((m) => ({
-          description: m.description,
-          genericName: m.genericName,
-          strength: m.strength,
-          strengthUnit: m.strengthUnit,
-          directions: m.directions,
-          status: m.status,
-          narcotic: m.narcotic,
-          rxNormId: m.rxNormId,
-          startTime: dateOnly(m.startTime),
-          orderTime: iso(m.orderTime),
-          createdTime: iso(m.createdTime),
-          revTime: iso(m.revTime),
-        })),
-        allergies: p.allergies.map((a) => ({
-          allergen: a.allergen,
-          category: a.category,
-          type: a.type,
-          severity: a.severity,
-          reactionType: a.reactionType,
-          reactionSubType: a.reactionSubType,
-          reactionNote: a.reactionNote,
-          clinicalStatus: a.clinicalStatus,
-          onsetDate: dateOnly(a.onsetDate),
-          resolvedDate: dateOnly(a.resolvedDate),
-          createdBy: a.createdBy,
-          createdTime: iso(a.createdTime),
-          revBy: a.revBy,
-          revTime: iso(a.revTime),
-        })),
-        observations: p.observations.map((o) => ({
-          method: o.method,
-          recordedBy: o.recordedBy,
-          recordedTime: iso(o.recordedTime),
-          data: o.data,
-        })),
-      }));
+      const detailed: PatientDetail[] = patients.map(toPatientDetail);
 
       return { query, matchCount: detailed.length, patients: detailed };
     },

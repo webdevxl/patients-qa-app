@@ -7,12 +7,16 @@
 // `patientId` foreign keys are indexed so cohort-scoped lookups stay cheap.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  // postgresqlExtensions lets the schema declare the pgvector extension below, so
+  // `prisma migrate` emits `CREATE EXTENSION IF NOT EXISTS "vector"` for us.
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
 }
 
 model Patient {
@@ -126,4 +130,23 @@ model PatientObservation {
 
   @@index([patientId])
   @@map("patient_observation")
+}
+
+// Distinct ICD-10 vocabulary with a semantic embedding of the description. Powers
+// `find_patients_by_condition`: a free-text condition is embedded and matched against these
+// rows by cosine similarity (`embedding <=> $query`), then joined to patient_condition ->
+// patient. Cohort-agnostic by design — codes are a shared vocabulary; only the patient join
+// is (eventually) cohort-scoped.
+//
+// `embedding` is a pgvector column Prisma can't model natively, so it's declared `Unsupported`
+// and read/written exclusively via raw SQL ($queryRaw / $executeRaw). It is nullable so the
+// row (code + description) can be upserted before its vector is backfilled. 1536 dims matches
+// OpenAI `text-embedding-3-small` (see src/embeddings/embeddings.factory.ts).
+model IcdCode {
+  code        String                       @id
+  description String
+  embedding   Unsupported("vector(1536)")?
+  createdTime DateTime                     @default(now()) @map("created_time") @db.Timestamptz
+
+  @@map("icd_code")
 }

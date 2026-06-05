@@ -12,7 +12,9 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",
-    "db:reset": "prisma migrate reset --force"
+    "db:reset": "prisma migrate reset --force",
+    "db:embed-icd:compute": "ts-node prisma/embed-icd-compute.ts",
+    "db:embed-icd:load": "ts-node prisma/embed-icd-load.ts"
   },
   "prisma": {
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"
@@ -36,6 +38,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.0",
     "csv-parse": "^5.6.0",
+    "dotenv": "^16.4.0",
     "prisma": "^6.3.0",
     "source-map-support": "^0.5.21",
     "ts-node": "^10.9.2",

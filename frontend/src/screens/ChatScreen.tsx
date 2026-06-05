@@ -11,7 +11,14 @@ import { Chip } from '../components/Chip';
 import { Composer } from '../components/Composer';
 import { MessageBubble, type ChatMessage } from '../components/MessageBubble';
 import { PatientCard } from '../components/PatientCard';
-import { postQaQuery, ApiError, type PatientDetail } from '../api/client';
+import { ConditionMatchCard } from '../components/ConditionMatchCard';
+import { PatientDetailModal } from '../components/PatientDetailModal';
+import {
+  postQaQuery,
+  ApiError,
+  type PatientDetail,
+  type ConditionMatch,
+} from '../api/client';
 import { cohortMeta } from '../domain/cohorts';
 import { cohortTheme, palette } from '../theme/palette';
 import type { CohortGroup } from '../theme/palette';
@@ -68,6 +75,12 @@ function introText(patients: PatientDetail[]): string {
   return `Found ${patients.length} matching patients — showing each record below. Refine by full name or patient ID to narrow it down.`;
 }
 
+// Lead-in line shown above the condition-search match cards.
+function conditionIntro(matches: ConditionMatch[]): string {
+  const n = matches.length;
+  return `Found ${n} patient${n === 1 ? '' : 's'} with a matching diagnosis — each shown below with its ICD-10 code. Ask about one by name for the full record.`;
+}
+
 export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
   const meta = cohortMeta(group);
   const accent = cohortTheme[group].accent;
@@ -75,6 +88,9 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
 
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
+  // The condition-match patient expanded in the detail modal (null = closed). The full record
+  // is already in hand from the search response, so tapping opens it with no extra request.
+  const [openPatient, setOpenPatient] = useState<PatientDetail | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: nextId(),
@@ -97,22 +113,33 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
 
     try {
       const result = await postQaQuery({ group, question });
-      const answerMsg: ChatMessage =
-        result.patients.length > 0
-          ? {
-              id: nextId(),
-              role: 'assistant',
-              text: introText(result.patients),
-              patients: result.patients,
-            }
-          : {
-              id: nextId(),
-              role: 'assistant',
-              text:
-                result.fallback ??
-                'I cannot find a matching patient in your cohort, or I cannot answer this question based on the available records.',
-              pending: true,
-            };
+      // The backend routes to one of two tools: `patients` (full record) or `matches`
+      // (condition search). Either array may be absent, so guard before reading length.
+      let answerMsg: ChatMessage;
+      if (result.patients && result.patients.length > 0) {
+        answerMsg = {
+          id: nextId(),
+          role: 'assistant',
+          text: introText(result.patients),
+          patients: result.patients,
+        };
+      } else if (result.matches && result.matches.length > 0) {
+        answerMsg = {
+          id: nextId(),
+          role: 'assistant',
+          text: conditionIntro(result.matches),
+          matches: result.matches,
+        };
+      } else {
+        answerMsg = {
+          id: nextId(),
+          role: 'assistant',
+          text:
+            result.fallback ??
+            'I cannot find a matching patient in your cohort, or I cannot answer this question based on the available records.',
+          pending: true,
+        };
+      }
       setMessages((prev) => [...prev, answerMsg]);
     } catch (e) {
       const text =
@@ -208,6 +235,14 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
               {m.patients?.map((p) => (
                 <PatientCard key={p.id} patient={p} accent={accent} />
               ))}
+              {m.matches?.map((mm) => (
+                <ConditionMatchCard
+                  key={mm.patient.id}
+                  match={mm}
+                  accent={accent}
+                  onPress={() => setOpenPatient(mm.patient)}
+                />
+              ))}
             </React.Fragment>
           ))}
           {pending ? (
@@ -264,6 +299,13 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
           placeholder={`Ask about a patient in ${meta.label}…`}
         />
       </KeyboardAvoidingView>
+
+      {/* Tapping a condition-match card expands the full record (already loaded) here. */}
+      <PatientDetailModal
+        patient={openPatient}
+        accent={accent}
+        onClose={() => setOpenPatient(null)}
+      />
     </Screen>
   );
 }

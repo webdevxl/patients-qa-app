@@ -1,6 +1,10 @@
 services:
   db:
-    image: postgres:16
+    # pgvector/pgvector:pg16 is the official postgres:16 image with the `vector`
+    # extension preinstalled — required for the ICD-10 embedding similarity search
+    # (see backend/prisma/schema.prisma `IcdCode.embedding`). Same PG16 engine, so the
+    # existing data volume mounts unchanged; only the container is recreated.
+    image: pgvector/pgvector:pg16
     container_name: patients-qa-db
     restart: unless-stopped
     environment:

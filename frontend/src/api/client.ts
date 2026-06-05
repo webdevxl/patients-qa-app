@@ -94,13 +94,34 @@ export interface PatientDetail {
 }
 
 /**
- * Result returned by the backend's `/qa/query` route. The agent resolves a patient and
- * returns the full record(s); `fallback` is set instead when nothing matched.
+ * One patient surfaced by the semantic condition search (find_patients_by_condition).
+ * Carries the patient's COMPLETE record (so the detail view renders on tap without another
+ * request) plus the diagnosis they matched on. Mirrors the backend ConditionMatch
+ * (backend/src/agents/tools/find-patients-by-condition.tool.ts).
+ */
+export interface ConditionMatch {
+  patient: PatientDetail;
+  matchedCondition: {
+    icd10Code: string;
+    icd10Description: string;
+    /** Cosine similarity in [-1, 1]; higher = closer. */
+    similarity: number;
+  };
+  confidence: 'High' | 'Medium' | 'Low';
+}
+
+/**
+ * Result returned by the backend's `/qa/query` route. The agent routes to one of two tools, so
+ * exactly one result array is populated:
+ *   • patients — full record(s) when a specific patient was resolved (find_patient).
+ *   • matches  — light per-patient hits when searching by condition (find_patients_by_condition).
+ *   • fallback — set instead when nothing matched.
  */
 export interface QaResult {
   question: string;
   matchCount: number;
-  patients: PatientDetail[];
+  patients?: PatientDetail[];
+  matches?: ConditionMatch[];
   fallback?: string;
 }
 
