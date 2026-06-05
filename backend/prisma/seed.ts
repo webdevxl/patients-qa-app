@@ -17,6 +17,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'csv-parse/sync';
 import { PrismaClient } from '@prisma/client';
+import {
+  normalizeAllergen,
+  type CanonicalAllergen,
+} from '../src/allergens/allergen-normalize';
 
 const prisma = new PrismaClient();
 const DATA_DIR = join(__dirname, 'seed-data');
@@ -109,7 +113,8 @@ async function main() {
   await prisma.patientObservation.deleteMany();
   await prisma.patientMedication.deleteMany();
   await prisma.patientCondition.deleteMany();
-  await prisma.patientAllergy.deleteMany();
+  await prisma.patientAllergy.deleteMany(); // references allergen, so clear before it
+  await prisma.allergen.deleteMany();
   await prisma.patient.deleteMany();
 
   // ---- patient (parent) ----
@@ -141,25 +146,58 @@ async function main() {
     prisma.patient.createMany({ data: c, skipDuplicates: true }),
   );
 
-  // ---- patient_allergy ----
-  const allergies = readCsv('patient_allergy.csv').map((r) => ({
-    id: r.id,
-    patientId: r.patient_id,
-    allergen: nullify(r.allergen),
-    category: nullify(r.category),
-    clinicalStatus: nullify(r.clinical_status),
-    createdBy: nullify(r.created_by),
-    createdTime: parseTs(r.created_time),
-    onsetDate: parseDate(r.onset_date),
-    reactionNote: nullify(r.reaction_note),
-    reactionType: nullify(r.reaction_type),
-    reactionSubType: nullify(r.reaction_sub_type),
-    resolvedDate: parseDate(r.resolved_date),
-    revBy: nullify(r.rev_by),
-    revTime: parseTs(r.rev_time),
-    severity: nullify(r.severity),
-    type: nullify(r.type),
-  }));
+  // ---- allergen dictionary + patient_allergy ----
+  // Collapse the noisy raw allergen strings onto a canonical vocabulary (see
+  // src/allergens/allergen-normalize.ts). Each allergy row points at its canonical allergen
+  // via `allergenId`. A row that names several allergens ("METFORMIN, ADHESIVE TAPE") is
+  // split into one patient_allergy record per allergen — the patient genuinely has two.
+  const canonicals = new Map<string, CanonicalAllergen>();
+  const allergies = readCsv('patient_allergy.csv').flatMap((r) => {
+    const category = nullify(r.category);
+    const cans = normalizeAllergen(nullify(r.allergen), category);
+    for (const c of cans) if (!canonicals.has(c.id)) canonicals.set(c.id, c);
+
+    const base = {
+      patientId: r.patient_id,
+      category,
+      clinicalStatus: nullify(r.clinical_status),
+      createdBy: nullify(r.created_by),
+      createdTime: parseTs(r.created_time),
+      onsetDate: parseDate(r.onset_date),
+      reactionNote: nullify(r.reaction_note),
+      reactionType: nullify(r.reaction_type),
+      reactionSubType: nullify(r.reaction_sub_type),
+      resolvedDate: parseDate(r.resolved_date),
+      revBy: nullify(r.rev_by),
+      revTime: parseTs(r.rev_time),
+      severity: nullify(r.severity),
+      type: nullify(r.type),
+    };
+
+    // 0–1 allergen: a single record keeping the source id and raw text (unlinked stays null).
+    if (cans.length <= 1) {
+      return [{ ...base, id: r.id, allergen: nullify(r.allergen), allergenId: cans[0]?.id ?? null }];
+    }
+    // Compound: one record per allergen. First keeps the source id + its fragment as the raw
+    // text; extras get a deterministic `-N` suffix so re-seeding stays idempotent.
+    return cans.map((c, i) => ({
+      ...base,
+      id: i === 0 ? r.id : `${r.id}-${i + 1}`,
+      allergen: c.rawFragment,
+      allergenId: c.id,
+    }));
+  });
+
+  // Dictionary first — patient_allergy.allergenId references it.
+  await insertBatched(
+    'allergen',
+    [...canonicals.values()].map((c) => ({
+      id: c.id,
+      canonicalName: c.canonicalName,
+      category: c.category,
+    })),
+    (c) => prisma.allergen.createMany({ data: c, skipDuplicates: true }),
+  );
   await insertBatched('patient_allergy', allergies, (c) =>
     prisma.patientAllergy.createMany({ data: c, skipDuplicates: true }),
   );

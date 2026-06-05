@@ -69,11 +69,31 @@ model PatientAllergy {
   revTime         DateTime? @map("rev_time") @db.Timestamptz
   severity        String?
   type            String?
+  allergenId      String?   @map("allergen_id") // FK to the canonical allergen dictionary
 
-  patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patient           Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  canonicalAllergen Allergen? @relation(fields: [allergenId], references: [id])
 
   @@index([patientId])
+  @@index([allergenId])
   @@map("patient_allergy")
+}
+
+// Canonical allergen vocabulary. One row per real-world allergen; the many noisy raw
+// `patient_allergy.allergen` strings (case/plural variants, synonyms, free-text noise)
+// collapse onto a single row via the deterministic normalizer in
+// src/allergens/allergen-normalize.ts. Each patient_allergy row points here via
+// `allergen_id`. Like `icd_code`, this is a shared vocabulary table; cohort scoping happens
+// on the patient join, not here.
+model Allergen {
+  id            String   @id // deterministic slug, e.g. "penicillin", "sulfa-antibiotics"
+  canonicalName String   @unique @map("canonical_name") // display name, e.g. "Penicillin"
+  category      String? // Drug | Food | Other (curated; falls back to the CSV category)
+  createdTime   DateTime @default(now()) @map("created_time") @db.Timestamptz
+
+  allergies PatientAllergy[]
+
+  @@map("allergen")
 }
 
 model PatientCondition {
