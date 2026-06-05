@@ -2,8 +2,8 @@
  * Standalone graph entrypoint for LangGraph Studio (`langgraph dev`).
  *
  * The production HTTP path no longer uses an agent — `QaService` now runs a single
- * structured-output EXTRACTOR (see patient-qa.agent.ts) and routes in code. Studio still needs a
- * compiled LangGraph graph to render, so here we assemble the *tool-calling* variant of the same
+ * structured-output find-patient agent (see find-patient.agent.ts) and routes in code. Studio still
+ * needs a compiled LangGraph graph to render, so here we assemble the *tool-calling* variant of the same
  * retrieval flow from the retained tool factories. It shares the exact retrieval/embedding logic
  * (find_patient / find_patients_by_condition) the HTTP path calls directly, so Studio remains a
  * faithful place to experiment with the tools; only the routing mechanism differs.
@@ -20,7 +20,7 @@ import { PrismaClient } from '@prisma/client';
 import type { PrismaService } from '../prisma/prisma.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
 import { createFindPatientsTool } from './tools/find-patients.tool';
-import { createChatModel } from './patient-qa.agent';
+import { createChatModel } from './agent-base';
 import { createTracingMiddleware } from './middleware/tracing.middleware';
 import { createTerminateAfterToolMiddleware } from './middleware/terminate-after-tool.middleware';
 

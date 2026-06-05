@@ -1,6 +1,6 @@
 import { Body, Controller, Post } from '@nestjs/common';
 import { QaService, QaResult } from './qa.service';
-import type { ChatTurn } from '../agents/patient-qa.agent';
+import type { ChatTurn } from '../agents/agent-base';
 import { ActiveCohort } from '../auth/active-cohort.decorator';
 import type { CohortGroup } from '../auth/cohort.types';
 

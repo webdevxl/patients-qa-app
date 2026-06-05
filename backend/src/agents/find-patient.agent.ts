@@ -1,4 +1,3 @@
-import { ChatOpenAI } from '@langchain/openai';
 import {
   SystemMessage,
   HumanMessage,
@@ -10,29 +9,36 @@ import {
   observationFilterSchema,
   medicationFilterSchema,
 } from './tools/find-patients.tool';
+import {
+  createChatModel,
+  sanitizeAndTrim,
+  readUsage,
+  type ChatModelOptions,
+  type ChatTurn,
+  type TokenUsage,
+} from './agent-base';
 
 /**
- * Safe fallback string (used verbatim per the spec) for when no patient can be resolved.
- * `QaService` returns this whenever extraction yields nothing routable, a retrieval matches
- * nothing, or extraction itself fails.
+ * The FIND-PATIENT agent — the FIRST model step. Given a clinician's message about the cohort
+ * ("which patients have diabetes?", "Erna Shearer", a UUID…) it extracts the search parameters that
+ * the `findPatients` retrieval then uses to return a LIST of candidate patients. Its job ends there:
+ * the UI picks one and sends that patient's id to the `answer-patient` agent.
+ *
+ * The model only ever EXTRACTS the fixed `extractionSchema` object — it never decides which
+ * retrieval to run and never answers the question. Routing is deterministic code in `QaService`
+ * (identity wins). Constraining the model to this fixed object (vs. free tool-calling / free text)
+ * is the core prompt-injection defense: the only thing it can emit is this fixed set of fields.
  */
-export const SAFE_FALLBACK =
-  'I cannot find a matching patient in your cohort, or I cannot answer this question based on the available records.';
 
 /**
- * The single, unified extraction schema. Its fields are exactly the UNION of the find_patients
- * tool's lookups ({patientId, name} for identity; {conditionQuery, allergyQuery} for attribute),
- * so the extracted object passes straight into `findPatients` with zero reshaping.
+ * The unified extraction schema. Its fields are exactly the UNION of the find_patients tool's
+ * lookups ({patientId, name} for identity; {conditionQuery, allergyQuery, …} for attribute), so the
+ * extracted object passes straight into `findPatients` with zero reshaping.
  *
- * The model only ever EXTRACTS these fields — it never decides which retrieval to run and never
- * answers the question. Routing is deterministic code in QaService (identity wins). Constraining
- * the model to this fixed object (vs. free tool-calling / free text) is also the core
- * prompt-injection defense: the only thing the model can emit is this fixed set of search fields.
- *
- * Fields are `.nullable()` (NOT `.optional()`): @langchain/openai v1's `withStructuredOutput`
- * uses OpenAI's strict structured-outputs mode, where every key must be present — optionality is
- * expressed as `null`. The model sets the fields that apply and returns `null` for the rest;
- * routing in QaService treats null/empty identically.
+ * Fields are `.nullable()` (NOT `.optional()`): @langchain/openai v1's `withStructuredOutput` uses
+ * OpenAI's strict structured-outputs mode, where every key must be present — optionality is
+ * expressed as `null`. The model sets the fields that apply and returns `null` for the rest; routing
+ * in QaService treats null/empty identically.
  */
 export const extractionSchema = z.object({
   patientId: z
@@ -106,48 +112,7 @@ export const EMPTY_EXTRACTION: Extraction = {
 };
 
 /**
- * One prior conversation turn the client sends so the extractor can resolve follow-ups
- * ("what about his allergies?"). Only `user`/`assistant` are accepted; assistant content is a
- * COMPACT resolution summary (see `QaResult.contextSummary`), never a full patient record.
- */
-export interface ChatTurn {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-/** Keep at most this many prior turns (history is for coreference, not full recall). */
-const MAX_HISTORY_TURNS = 6;
-/** Cap any single turn's content to bound tokens + injection surface. */
-const MAX_CONTENT_CHARS = 500;
-
-/**
- * Harden client-supplied history before it reaches the model:
- *   • whitelist roles to user/assistant (drops any injected `system`/`tool` turn),
- *   • coerce content to a trimmed, length-capped string,
- *   • keep only the most recent MAX_HISTORY_TURNS.
- * The extractor still prepends its OWN trusted system prompt, so a poisoned history can at most
- * nudge the extracted search fields — it can never replace the instructions or bypass routing.
- */
-export function sanitizeAndTrim(history: ChatTurn[] | undefined): ChatTurn[] {
-  if (!Array.isArray(history)) return [];
-  return history
-    .filter(
-      (turn): turn is ChatTurn =>
-        !!turn &&
-        (turn.role === 'user' || turn.role === 'assistant') &&
-        typeof turn.content === 'string' &&
-        turn.content.trim().length > 0,
-    )
-    .map((turn) => ({
-      role: turn.role,
-      content: turn.content.trim().slice(0, MAX_CONTENT_CHARS),
-    }))
-    .slice(-MAX_HISTORY_TURNS);
-}
-
-/**
- * The extraction system prompt. (A/B prompt variants will be added later — for now a single
- * prompt; keep it targeting `extractionSchema` so any future variant is a drop-in.)
+ * The extraction system prompt — a single trusted prompt targeting `extractionSchema`.
  */
 const EXTRACTION_SYSTEM_PROMPT = `You extract structured search parameters from a clinician's chat message. You do NOT answer the question — another layer retrieves the records. Read the latest user message (use earlier turns only to resolve references) and fill ONLY the fields that apply:
 
@@ -160,85 +125,36 @@ const EXTRACTION_SYSTEM_PROMPT = `You extract structured search parameters from 
 
 If the message identifies no specific patient and asks for no searchable condition, allergy, measurement, or medication, leave every field empty.`;
 
-/** Token usage for one extraction call (best-effort; surfaced for observability). */
-export interface ExtractionUsage {
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
-}
-
-/** What the extractor returns: the parsed fields plus best-effort token usage. */
+/** What the find-patient agent returns: the parsed search params plus best-effort token usage. */
 export interface ExtractionResult {
   extraction: Extraction;
-  usage?: ExtractionUsage;
+  usage?: TokenUsage;
   /** True when the model refused / returned unparseable output and we substituted EMPTY_EXTRACTION. */
   refused?: boolean;
 }
 
-export interface PatientQaExtractor {
+export interface FindPatientAgent {
   extract(question: string, history?: ChatTurn[]): Promise<ExtractionResult>;
 }
 
-/** Nest DI token for the extractor, so `QaService` receives a mockable, config-driven instance. */
-export const PATIENT_QA_EXTRACTOR = Symbol('PATIENT_QA_EXTRACTOR');
-
-/** Pull token usage off the raw AIMessage (`usage_metadata`), if present. */
-export function readUsage(raw: BaseMessage): ExtractionUsage | undefined {
-  const usage = (raw as AIMessage).usage_metadata;
-  if (!usage) return undefined;
-  return {
-    inputTokens: usage.input_tokens,
-    outputTokens: usage.output_tokens,
-    totalTokens: usage.total_tokens,
-  };
-}
-
-/** Default chat model + sampling for the extractor; overridable via ConfigService at the DI layer. */
-export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini';
-export const DEFAULT_CHAT_TEMPERATURE = 0;
-// Client-side resilience so a slow/stalled OpenAI call fails FAST into the safe-fallback path
-// instead of inheriting the SDK's ~10-minute default and fanning out unbounded under load. Worst-
-// case wall time ≈ timeout × (1 + maxRetries), so keep retries low.
-const CHAT_TIMEOUT_MS = 15_000;
-const CHAT_MAX_RETRIES = 2;
-const CHAT_MAX_CONCURRENCY = 8;
-
-/** Tuning knobs for the chat model (model + temperature); resilience is fixed in {@link createChatModel}. */
-export interface ChatModelOptions {
-  model?: string;
-  temperature?: number;
-}
+/** Nest DI token for the find-patient agent, so `QaService` receives a mockable, config-driven instance. */
+export const FIND_PATIENT_AGENT = Symbol('FIND_PATIENT_AGENT');
 
 /**
- * Single place the OpenAI chat client is constructed (the extractor here + the Studio graph), so the
- * model name, temperature, and resilience config live in ONE spot. Undefined options fall back to the
- * defaults. Reads OPENAI_API_KEY from the environment (kept Nest-free so Studio/scripts can reuse it).
- */
-export function createChatModel(options: ChatModelOptions = {}): ChatOpenAI {
-  return new ChatOpenAI({
-    model: options.model ?? DEFAULT_CHAT_MODEL,
-    temperature: options.temperature ?? DEFAULT_CHAT_TEMPERATURE,
-    timeout: CHAT_TIMEOUT_MS,
-    maxRetries: CHAT_MAX_RETRIES,
-    maxConcurrency: CHAT_MAX_CONCURRENCY,
-  });
-}
-
-/**
- * Build the patient Q&A EXTRACTOR: a single `withStructuredOutput` model call that pulls the
- * search parameters (patientId/name/conditionQuery/allergyQuery/…) out of the latest question,
- * using the trimmed conversation history only to resolve references ("his allergies").
+ * Build the FIND-PATIENT agent: a single `withStructuredOutput` model call that pulls the search
+ * parameters (patientId/name/conditionQuery/allergyQuery/…) out of the latest question, using the
+ * trimmed conversation history only to resolve references ("his allergies").
  *
- * This REPLACES the old tool-calling agent. There is no agent loop and no tool execution here —
- * the model can only emit the fixed `extractionSchema` object (the core injection defense), and
- * `QaService` routes deterministically in code to the single `findPatients` retrieval.
+ * There is no agent loop and no tool execution here — the model can only emit the fixed
+ * `extractionSchema` object (the core injection defense), and `QaService` routes deterministically
+ * in code to the single `findPatients` retrieval.
  *
  * On a refusal / unparseable output (e.g. an injection that trips OpenAI strict mode) `parsed` is
  * null — we return an EXPLICIT {@link EMPTY_EXTRACTION} and flag `refused`, so routing reaches the
  * safe fallback intentionally instead of throwing a downstream TypeError. `includeRaw: true` keeps
  * the raw AIMessage for token-usage logging.
  */
-export function createPatientQaExtractor(options: ChatModelOptions = {}): PatientQaExtractor {
+export function createFindPatientAgent(options: ChatModelOptions = {}): FindPatientAgent {
   const structured = createChatModel(options).withStructuredOutput(extractionSchema, {
     name: 'extract_search_params',
     includeRaw: true,

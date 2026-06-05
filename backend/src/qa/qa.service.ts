@@ -2,19 +2,18 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
+import { SAFE_FALLBACK, type ChatTurn } from '../agents/agent-base';
 import {
-  SAFE_FALLBACK,
-  PATIENT_QA_EXTRACTOR,
-  type PatientQaExtractor,
-  type ChatTurn,
+  FIND_PATIENT_AGENT,
+  type FindPatientAgent,
   type Extraction,
-} from '../agents/patient-qa.agent';
+} from '../agents/find-patient.agent';
 import {
-  PATIENT_ANSWERER,
+  ANSWER_PATIENT_AGENT,
   serializePatientForPrompt,
-  type PatientAnswerer,
+  type AnswerPatientAgent,
   type AnswerConfidence,
-} from '../agents/patient-answer.agent';
+} from '../agents/answer-patient.agent';
 import {
   findPatients,
   patientInclude,
@@ -105,8 +104,8 @@ export class QaService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly embeddings: EmbeddingsService,
-    @Inject(PATIENT_QA_EXTRACTOR) private readonly extractor: PatientQaExtractor,
-    @Inject(PATIENT_ANSWERER) private readonly answerer: PatientAnswerer,
+    @Inject(FIND_PATIENT_AGENT) private readonly findPatientAgent: FindPatientAgent,
+    @Inject(ANSWER_PATIENT_AGENT) private readonly answerPatientAgent: AnswerPatientAgent,
   ) {}
 
   async query(
@@ -145,7 +144,7 @@ export class QaService {
     //       fallback rather than throwing a 500. ──
     let extraction: Extraction;
     try {
-      const extractionResult = await this.extractor.extract(boundedQuestion, history);
+      const extractionResult = await this.findPatientAgent.extract(boundedQuestion, history);
       extraction = extractionResult.extraction;
       if (extractionResult.refused) {
         this.logger.warn(`🛡️ [${shortId}] extractor refused / returned null → safe fallback`);
@@ -242,7 +241,7 @@ export class QaService {
 
       // ── Serialize the record + one grounded answer call. ──
       const { context } = serializePatientForPrompt(toPatientDetail(row));
-      const { result, usage, refused } = await this.answerer.answer(
+      const { result, usage, refused } = await this.answerPatientAgent.answer(
         boundedQuestion,
         context,
         history,
