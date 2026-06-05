@@ -109,14 +109,21 @@ export function MessageBubble({
               <XStack
                 key={c}
                 alignItems="center"
-                gap={4}
-                paddingHorizontal={8}
+                gap={6}
+                paddingHorizontal={9}
                 paddingVertical={4}
                 borderRadius={radius.chip}
                 backgroundColor={palette.tertiarySystemFill}
               >
-                <Ionicons name="document-text" size={11} color={palette.secondaryLabel} />
-                <Text fontSize={12} fontWeight="500" color={palette.secondaryLabel}>
+                {/* Brand pill: a periwinkle dot + monospaced code, à la the reference chips. */}
+                <YStack width={6} height={6} borderRadius={3} backgroundColor={palette.primary} />
+                <Text
+                  fontFamily="$mono"
+                  fontSize={12}
+                  fontWeight="500"
+                  color={palette.navy100}
+                  letterSpacing={-0.2}
+                >
                   {c}
                 </Text>
               </XStack>

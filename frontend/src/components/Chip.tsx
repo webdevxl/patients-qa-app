@@ -17,8 +17,8 @@ interface ChipProps {
 
 export function Chip({
   label,
-  color = palette.secondaryLabel,
-  background = palette.secondarySystemFill,
+  color = palette.navy100,
+  background = palette.tertiarySystemFill,
   icon,
   size = 'md',
 }: ChipProps) {

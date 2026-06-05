@@ -251,7 +251,7 @@ function Section({
 
 function conditionRow(c: ConditionDetail, i: number) {
   const tags: { label: string; color: string }[] = [];
-  if (c.isPrimaryDiagnosis) tags.push({ label: 'Primary', color: palette.blue });
+  if (c.isPrimaryDiagnosis) tags.push({ label: 'Primary', color: palette.primary });
   if (c.clinicalStatus)
     tags.push({ label: c.clinicalStatus, color: statusColor(c.clinicalStatus) });
   const onset = fmtDate(c.onsetDate);

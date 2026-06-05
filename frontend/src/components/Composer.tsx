@@ -54,7 +54,7 @@ export function Composer({
         color={palette.label}
         borderWidth={1}
         borderColor={palette.hairline}
-        backgroundColor={palette.systemGroupedBackground}
+        backgroundColor={palette.glass}
         borderRadius={radius.bubble}
         focusStyle={{ borderColor: accent }}
         onSubmitEditing={canSend ? onSend : undefined}

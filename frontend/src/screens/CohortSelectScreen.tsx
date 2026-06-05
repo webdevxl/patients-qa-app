@@ -10,6 +10,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Screen } from '../components/Screen';
 import { CohortCard } from '../components/CohortCard';
 import { PrimaryButton } from '../components/PrimaryButton';
+import { Logo } from '../components/Logo';
 import { COHORTS, cohortMeta } from '../domain/cohorts';
 import { cohortTheme, palette } from '../theme/palette';
 import type { CohortGroup } from '../theme/palette';
@@ -53,32 +54,19 @@ export function CohortSelectScreen({ onSelect }: CohortSelectScreenProps) {
         }}
         showsVerticalScrollIndicator={false}
       >
-        {/* App mark */}
-        <YStack
-          width={56}
-          height={56}
-          borderRadius={16}
-          alignItems="center"
-          justifyContent="center"
-          backgroundColor={palette.blue}
-          marginBottom={20}
-        >
-          <Ionicons name="medkit" size={30} color={palette.white} />
-        </YStack>
-
-        {/* Title block — iOS large-title scale */}
-        <Text fontSize={34} fontWeight="800" color={palette.label} letterSpacing={-0.8}>
-          Patient Q&A
-        </Text>
-        <Text
-          fontSize={17}
-          color={palette.secondaryLabel}
-          marginTop={6}
-          letterSpacing={-0.2}
-        >
-          Choose a cohort to begin. Every answer stays scoped to the group you
-          select.
-        </Text>
+        {/* Brand header — logo on the same line as the app name + subtitle */}
+        <XStack alignItems="center" gap={14}>
+          <Logo size={42} color={palette.primary} />
+          <YStack flex={1} gap={3}>
+            <Text fontSize={26} fontWeight="800" color={palette.label} letterSpacing={-0.6}>
+              Patient Q&A
+            </Text>
+            <Text fontSize={14} color={palette.secondaryLabel} letterSpacing={-0.1}>
+              Choose a cohort to begin. Every answer stays scoped to the group you
+              select.
+            </Text>
+          </YStack>
+        </XStack>
 
         {/* Safety reassurance — ties the picker to the app's central invariant */}
         <XStack
@@ -136,7 +124,7 @@ export function CohortSelectScreen({ onSelect }: CohortSelectScreenProps) {
           onPress={confirm}
           disabled={!pending}
           loading={submitting}
-          color={pending ? cohortTheme[pending].accent : undefined}
+          gradient={pending ? cohortTheme[pending].gradient : undefined}
           iconAfter="arrow-forward"
         />
         <Text
