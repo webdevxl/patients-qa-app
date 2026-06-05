@@ -120,11 +120,13 @@ export interface ConditionMatch {
 }
 
 /**
- * Result returned by the backend's `/qa/query` route. The agent routes to one of two tools, so
- * exactly one result array is populated:
- *   • patients — full record(s) when a specific patient was resolved (find_patient).
- *   • matches  — light per-patient hits when searching by condition (find_patients_by_condition).
- *   • fallback — set instead when nothing matched.
+ * Result returned by the backend's `/qa/query` route. The backend extracts search params and
+ * routes to one retrieval, so exactly one result array is populated:
+ *   • patients       — full record(s) when a specific patient was resolved (find_patient).
+ *   • matches        — per-patient hits when searching by condition/allergy.
+ *   • fallback       — set instead when nothing matched.
+ *   • contextSummary — compact one-line summary of what resolved; echo it back as the assistant
+ *                      turn in `history` so follow-ups ("what about his allergies?") resolve.
  */
 export interface QaResult {
   question: string;
@@ -132,6 +134,16 @@ export interface QaResult {
   patients?: PatientDetail[];
   matches?: ConditionMatch[];
   fallback?: string;
+  contextSummary?: string;
+}
+
+/**
+ * One prior conversation turn sent so the backend can resolve follow-up references. Assistant
+ * content is the compact `contextSummary` (never a full record). The backend sanitizes/trims it.
+ */
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
 }
 
 export class ApiError extends Error {
@@ -164,13 +176,14 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 /**
- * Ask a cohort-scoped question. The backend's `/qa/query` route runs the LangChain
- * patient Q&A agent over the given cohort and free-text question. The cohort is always
- * sent explicitly so the request is answered against the chosen group.
+ * Ask a cohort-scoped question. The backend's `/qa/query` route extracts search params from the
+ * question (using `history` to resolve follow-up references) and returns the grounded result.
+ * History is client-supplied (stateless backend); the cohort is sent explicitly.
  */
 export function postQaQuery(params: {
   group: CohortGroup;
   question: string;
+  history?: ChatTurn[];
 }): Promise<QaResult> {
   return postJson<QaResult>('/qa/query', params);
 }

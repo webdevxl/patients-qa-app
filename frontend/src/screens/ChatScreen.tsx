@@ -18,6 +18,7 @@ import {
   ApiError,
   type PatientDetail,
   type ConditionMatch,
+  type ChatTurn,
 } from '../api/client';
 import { cohortMeta } from '../domain/cohorts';
 import { cohortTheme, palette } from '../theme/palette';
@@ -140,10 +141,25 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
     setPending(true);
     requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated: true }));
 
+    // Build conversation history from the transcript SO FAR (this closure's `messages` predates
+    // the question we're sending). User turns carry their text; assistant turns carry only the
+    // compact `contextSummary` from a real answer (skipping the greeting / errors / fallbacks),
+    // so the backend extractor can resolve "his/her" without ever seeing full records.
+    const history: ChatTurn[] = messages
+      .map((m): ChatTurn | null =>
+        m.role === 'user'
+          ? { role: 'user', content: m.text }
+          : m.contextSummary
+            ? { role: 'assistant', content: m.contextSummary }
+            : null,
+      )
+      .filter((t): t is ChatTurn => t !== null)
+      .slice(-8);
+
     try {
-      const result = await postQaQuery({ group, question });
-      // The backend routes to one of two tools: `patients` (full record) or `matches`
-      // (condition search). Either array may be absent, so guard before reading length.
+      const result = await postQaQuery({ group, question, history });
+      // The backend routes to one retrieval: `patients` (full record) or `matches`
+      // (condition/allergy search). Either array may be absent, so guard before reading length.
       let answerMsg: ChatMessage;
       if (result.patients && result.patients.length > 0) {
         answerMsg = {
@@ -151,6 +167,7 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
           role: 'assistant',
           text: introText(result.patients),
           patients: result.patients,
+          contextSummary: result.contextSummary,
         };
       } else if (result.matches && result.matches.length > 0) {
         answerMsg = {
@@ -158,6 +175,7 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
           role: 'assistant',
           text: conditionIntro(result.matches),
           matches: result.matches,
+          contextSummary: result.contextSummary,
         };
       } else {
         answerMsg = {

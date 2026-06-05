@@ -23,6 +23,12 @@ export interface ChatMessage {
   patients?: PatientDetail[];
   /** Condition-search hits — rendered as compact ConditionMatchCards beneath the bubble. */
   matches?: ConditionMatch[];
+  /**
+   * Compact one-line summary of what this answer resolved (from `QaResult.contextSummary`).
+   * Not rendered — it's echoed back as this turn's `history` content so the backend extractor
+   * can resolve follow-up references ("what about his allergies?") without re-sending records.
+   */
+  contextSummary?: string;
   /** Marks the safe-fallback / system notices so they can read differently. */
   pending?: boolean;
 }

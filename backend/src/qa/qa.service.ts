@@ -1,30 +1,31 @@
 import { Injectable, Logger } from '@nestjs/common';
-import type { BaseMessage } from '@langchain/core/messages';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
-import { createPatientQaAgent, SAFE_FALLBACK } from '../agents/patient-qa.agent';
-import type {
-  FindPatientResult,
-  PatientDetail,
-} from '../agents/tools/find-patient.tool';
-import type {
-  FindPatientsByConditionResult,
-  ConditionMatch,
-} from '../agents/tools/find-patients-by-condition.tool';
-
-/** Tool names the agent can call; used to shape the response by which retrieval ran. */
-const FIND_PATIENT = 'find_patient';
-const FIND_PATIENTS_BY_CONDITION = 'find_patients_by_condition';
-const TOOL_NAMES = [FIND_PATIENT, FIND_PATIENTS_BY_CONDITION];
+import {
+  createPatientQaExtractor,
+  SAFE_FALLBACK,
+  type PatientQaExtractor,
+  type ChatTurn,
+} from '../agents/patient-qa.agent';
+import {
+  findPatients,
+  type FindPatientsResult,
+  type PatientDetail,
+  type ConditionMatch,
+} from '../agents/tools/find-patients.tool';
 
 /**
- * Response returned to the client. The agent doesn't compose prose — it routes to a retrieval
- * tool and that tool's output is surfaced directly. Exactly one of the result arrays is
- * populated depending on which tool ran:
- *   • patients   — full records (find_patient).
- *   • matches    — light per-patient condition hits (find_patients_by_condition).
- *   • matchCount — number of results (0 ⇒ nothing resolved/matched).
- *   • fallback   — the safe-fallback string, present only when matchCount is 0.
+ * Response returned to the client. The model only extracts search params — it never composes
+ * prose — so exactly one of the result arrays is populated by the retrieval that ran:
+ *   • patients       — full records (findPatient).
+ *   • matches        — per-patient condition/allergy hits (findPatientsByCondition).
+ *   • matchCount     — number of results (0 ⇒ nothing resolved/matched).
+ *   • fallback       — the safe-fallback string, present only when matchCount is 0.
+ *   • contextSummary — a COMPACT one-line summary of what resolved (e.g. "Resolved patient:
+ *                      Adolfo Ricker"). The client stores it and echoes it back as the assistant
+ *                      turn in `history`, so follow-ups ("what about his allergies?") can resolve
+ *                      references — WITHOUT re-sending full records to the model.
  */
 export interface QaResult {
   question: string;
@@ -32,83 +33,104 @@ export interface QaResult {
   patients?: PatientDetail[];
   matches?: ConditionMatch[];
   fallback?: string;
+  contextSummary?: string;
 }
 
-/** Normalize a message's type across LangChain's `getType()` / `_getType()` variants. */
-function messageType(msg: BaseMessage | undefined): string | undefined {
-  if (!msg) return undefined;
-  return typeof (msg as { getType?: () => string }).getType === 'function'
-    ? (msg as { getType: () => string }).getType()
-    : (msg as { _getType?: () => string })._getType?.();
-}
-
-/** True when `msg` is a result from one of our retrieval tools. */
-function isRetrievalToolMessage(msg: BaseMessage | undefined): boolean {
-  const name = (msg as { name?: string } | undefined)?.name;
-  return messageType(msg) === 'tool' && !!name && TOOL_NAMES.includes(name);
-}
-
-/** A `ToolMessage`'s content is the JSON-stringified tool return; parse it back to an object. */
-function parseToolResult<T>(content: unknown): T | null {
-  try {
-    const text =
-      typeof content === 'string' ? content : JSON.stringify(content);
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
-}
+const fullName = (p: PatientDetail): string =>
+  `${p.nameFirst ?? ''} ${p.nameLast ?? ''}`.trim() || p.id;
 
 /**
- * Thin bridge between the HTTP layer and the LangChain agent. Builds the agent once (stateless,
- * reused across requests) and invokes it per question. The agent's job is retrieval routing: it
- * calls either `find_patient` or `find_patients_by_condition`, which is the terminal step — so
- * we read that tool's result straight out of the message history and return it to the client,
- * without a second model pass. No cohort scoping yet — searches span all patients for now.
+ * Thin bridge between the HTTP layer and the LangChain extractor. Builds the stateless extractor
+ * once and, per request: (1) extracts search params from the question + trimmed history in ONE
+ * model call, (2) routes deterministically in code (identity wins), (3) calls the matching
+ * retrieval function, (4) shapes the response. No second model pass; the model never sees the
+ * retrieved records. No cohort scoping yet — searches span all patients for now.
  */
 @Injectable()
 export class QaService {
   private readonly logger = new Logger(QaService.name);
-  private readonly agent: ReturnType<typeof createPatientQaAgent>;
+  private readonly extractor: PatientQaExtractor = createPatientQaExtractor();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly embeddings: EmbeddingsService,
-  ) {
-    this.agent = createPatientQaAgent(this.prisma, this.embeddings);
-  }
+  ) {}
 
-  async query(question: string): Promise<QaResult> {
-    this.logger.log(`qa query question=${question}`);
+  async query(question: string, history: ChatTurn[] = []): Promise<QaResult> {
+    const traceId = randomUUID().slice(0, 8);
+    const startedAt = Date.now();
+    this.logger.log(
+      `🏁 [${traceId}] qa query — "${question}" (history: ${history.length} turn(s))`,
+    );
 
-    const result = await this.agent.invoke({
-      messages: [{ role: 'user', content: question }],
-    });
-
-    // The agent ends on the tool's output (see terminate-after-tool middleware). Scan from the
-    // end for the retrieval ToolMessage and hand its records/matches back verbatim. If the
-    // model chose not to call a tool (nothing identifiable/searchable), there's no tool
-    // message → fallback.
-    const messages: BaseMessage[] = result.messages;
-    const toolMsg = [...messages].reverse().find(isRetrievalToolMessage);
-    const toolName = (toolMsg as { name?: string } | undefined)?.name;
-
-    if (toolName === FIND_PATIENTS_BY_CONDITION) {
-      const r = parseToolResult<FindPatientsByConditionResult>(toolMsg?.content);
-      if (!r || r.matchCount === 0) return this.empty(question);
-      return { question, matchCount: r.matchCount, matches: r.matches };
+    // ── 1. Extract (the only LLM call). A malformed/failed extraction degrades to the safe
+    //       fallback rather than throwing a 500. ──
+    let extraction;
+    try {
+      const res = await this.extractor.extract(question, history);
+      extraction = res.extraction;
+      const u = res.usage;
+      this.logger.log(
+        `🔎 [${traceId}] extracted ${JSON.stringify(extraction)} in ` +
+          `${Date.now() - startedAt}ms` +
+          (u ? ` | tokens in/out/total: ${u.inputTokens ?? '?'}/${u.outputTokens ?? '?'}/${u.totalTokens ?? '?'}` : ''),
+      );
+    } catch (err) {
+      this.logger.error(`💥 [${traceId}] extraction failed: ${String(err)}`);
+      return this.empty(question);
     }
 
-    if (toolName === FIND_PATIENT) {
-      const r = parseToolResult<FindPatientResult>(toolMsg?.content);
-      if (!r || r.matchCount === 0) return this.empty(question);
-      return { question, matchCount: r.matchCount, patients: r.patients };
+    // ── 2. Retrieve via the single tool — it routes internally (identity beats a co-mentioned
+    //       condition/allergy) and returns either `patients` (identity) or `matches` (attribute). ──
+    const r: FindPatientsResult = await findPatients(
+      this.prisma,
+      this.embeddings,
+      extraction,
+    );
+
+    if (r.matchCount === 0) {
+      this.logger.log(
+        `🚫 [${traceId}] find_patients → 0 matches (${Date.now() - startedAt}ms total) → fallback`,
+      );
+      return this.empty(question);
     }
 
-    return this.empty(question);
+    if (r.patients) {
+      this.logger.log(
+        `👤 [${traceId}] find_patients (identity) → matchCount=${r.matchCount} (${Date.now() - startedAt}ms total)`,
+      );
+      return {
+        question,
+        matchCount: r.matchCount,
+        patients: r.patients,
+        contextSummary: `Resolved ${r.matchCount} patient${r.matchCount === 1 ? '' : 's'}: ${r.patients
+          .map(fullName)
+          .join(', ')}`,
+      };
+    }
+
+    // Attribute search → `matches`.
+    const matches = r.matches ?? [];
+    const what = [
+      r.query.conditionQuery ? `condition "${r.query.conditionQuery}"` : null,
+      r.query.allergyQuery ? `allergy "${r.query.allergyQuery}"` : null,
+    ]
+      .filter(Boolean)
+      .join(' + ');
+    this.logger.log(
+      `🩺 [${traceId}] find_patients (${what}) → matchCount=${r.matchCount} (${Date.now() - startedAt}ms total)`,
+    );
+    return {
+      question,
+      matchCount: r.matchCount,
+      matches,
+      contextSummary: `Search (${what}) → ${r.matchCount} match${r.matchCount === 1 ? '' : 'es'}: ${matches
+        .map((m) => fullName(m.patient))
+        .join(', ')}`,
+    };
   }
 
-  /** No tool ran, or it returned nothing → the safe fallback. */
+  /** No usable extraction, or a retrieval returned nothing → the safe fallback. */
   private empty(question: string): QaResult {
     return { question, matchCount: 0, fallback: SAFE_FALLBACK };
   }
