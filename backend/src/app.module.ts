@@ -8,9 +8,22 @@ import { CohortAuthGuard } from './auth/cohort-auth.guard';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 
+/**
+ * Fail fast at boot on missing required secrets, rather than at first request (the LLM/embeddings
+ * SDKs read OPENAI_API_KEY lazily). `JWT_SECRET` is additionally validated where it's consumed.
+ */
+function validateEnv(config: Record<string, unknown>): Record<string, unknown> {
+  const required = ['DATABASE_URL', 'OPENAI_API_KEY', 'JWT_SECRET'];
+  const missing = required.filter((key) => !config[key]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variable(s): ${missing.join(', ')}`);
+  }
+  return config;
+}
+
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     PrismaModule,
     AuthModule,
     QaModule,

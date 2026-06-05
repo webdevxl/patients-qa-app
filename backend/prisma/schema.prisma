@@ -118,6 +118,10 @@ model PatientCondition {
   patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
 
   @@index([patientId])
+  // Covering index for Stage-2 of the attribute search (find-patients.tool.ts): resolve
+  // `icd_10_code = ANY(resolved codes)` and read `patient_id` for the patient join from the index
+  // alone. Mirrors patient_allergy(allergen_id), which already serves the allergy path.
+  @@index([icd10Code, patientId])
   @@map("patient_condition")
 }
 

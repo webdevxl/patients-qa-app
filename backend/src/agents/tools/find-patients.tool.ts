@@ -339,12 +339,13 @@ export interface FindPatientsResult {
 // Distinct patients to return on either path.
 const MAX_MATCHES = 5;
 const OBSERVATION_LIMIT = 50;
-// Minimum cosine similarity for an attribute hit to count. Cosine always returns *something*, so
-// without a floor we'd surface unrelated rows (and never reach the safe fallback). maxDistance =
-// 1 - threshold because pgvector's `<=>` returns cosine DISTANCE (1 - similarity).
+// Minimum cosine similarity for an attribute (condition/allergy) concept to count. Cosine always
+// returns *something*, so without a floor we'd surface unrelated concepts (and never reach the safe
+// fallback). Applied to the ≤CONCEPT_LIMIT vocabulary rows returned by the Stage-1 top-K.
 const SIMILARITY_THRESHOLD = 0.45;
-// Candidate rows to pull per search before de-duping to distinct patients in JS.
-const CANDIDATE_LIMIT = 100;
+// Distinct vocabulary concepts to resolve per fuzzy field (Stage 1) before the cohort-scoped patient
+// lookup (Stage 2). Caps the inline VALUES size; the closest concepts dominate, so this is ample.
+const CONCEPT_LIMIT = 50;
 
 /** Date-only (`YYYY-MM-DD`) for `@db.Date` columns. */
 const dateOnly = (d: Date | null): string | null =>
@@ -473,17 +474,16 @@ function buildWhere(group: CohortGroup, patientId?: string, name?: string) {
   return null;
 }
 
-/** Raw ranking row from the condition similarity query (one per matching diagnosis). */
-interface ConditionRankRow {
-  patientId: string;
-  icd10Code: string;
-  icd10Description: string;
+/** A resolved ICD diagnosis concept from Stage 1 (vocabulary top-K): the code + how close to the query. */
+interface ConditionConcept {
+  code: string;
+  description: string;
   similarity: number;
 }
 
-/** Raw ranking row from the allergy similarity query (one per matching allergen). */
-interface AllergyRankRow {
-  patientId: string;
+/** A resolved allergen concept from Stage 1 (canonical allergen vocabulary top-K). */
+interface AllergenConcept {
+  id: string;
   canonicalName: string;
   category: string | null;
   similarity: number;
@@ -508,11 +508,40 @@ function toConfidence(similarity: number): ConditionMatch['confidence'] {
   return 'Low';
 }
 
-/** Raw row from the observation filter query (one per matching patient, latest reading). */
-interface ObservationRankRow {
+/**
+ * One row from the single Stage-2 patient query. Columns exist only for the constraints that actually
+ * ran (a medication-only query has no `obs*`/`cond*`/`alg*` columns, etc.), so all but `patientId`
+ * are optional.
+ */
+interface PatientRow {
   patientId: string;
-  value: number | string | null;
-  recordedTime: Date | string | null;
+  condCode?: string | null;
+  condSim?: number | string | null;
+  algId?: string | null;
+  algSim?: number | string | null;
+  medDescription?: string | null;
+  medGenericName?: string | null;
+  medStrength?: string | null;
+  medStrengthUnit?: string | null;
+  medDirections?: string | null;
+  medNarcotic?: boolean | null;
+  obsValue?: number | string | null;
+  obsRecordedTime?: Date | string | null;
+}
+
+/**
+ * One AND-ed constraint contributing to the single Stage-2 patient query. Each is an inner `LATERAL`
+ * that BOTH filters (a patient with no matching row is dropped — this is the AND) and surfaces the
+ * matched record; `selectColumns` reads it back and `annotate` attaches it to the candidate. The
+ * DB-side ranking is fed by `orderBy` (observation, by measured value) or `similarityCol`
+ * (condition/allergy, by cosine similarity), so the final `LIMIT` keeps the right rows.
+ */
+interface PatientConstraint {
+  selectColumns: Prisma.Sql;
+  lateralJoin: Prisma.Sql;
+  annotate: (candidate: Candidate, row: PatientRow) => void;
+  orderBy?: Prisma.Sql;
+  similarityCol?: Prisma.Sql;
 }
 
 /** Operator → symbol, for the human-readable measurement summary. */
@@ -569,19 +598,14 @@ function describeObservation(f: ObservationFilter): string {
 }
 
 /**
- * Observation (measurement) filter: numeric predicate over the JSONB `data` column. Unlike the
- * condition/allergy paths this is DETERMINISTIC — a patient's reading either passes or it doesn't,
- * no embeddings. Returns one entry per matching patient (their latest matching reading).
- *
- * Cohort scoping is enforced in the SQL itself (`AND p."group" = ${group}`), identical to the
- * similarity queries. Injection-safe: the metric, the JSON value-key and the unit key are bound
- * PARAMETERS; the operator is a whitelisted constant fragment; only numeric bounds are user data.
+ * Build the observation (measurement) constraint for the Stage-2 query: an inner `LATERAL` that
+ * keeps only patients whose latest matching reading satisfies a numeric predicate over the JSONB
+ * `data` column, and surfaces that value (which also drives the query's ORDER BY). Deterministic — a
+ * reading either passes or it doesn't. Injection-safe: the metric and JSON value-key are bound
+ * params, the operator is a whitelisted constant fragment, only numeric bounds are user data, and
+ * the ORDER BY direction is a whitelisted ASC/DESC fragment.
  */
-async function findObservationMatches(
-  prisma: PrismaService,
-  group: CohortGroup,
-  filter: ObservationFilter,
-): Promise<Map<string, NonNullable<ConditionMatch['matchedObservation']>>> {
+function buildObservationConstraint(filter: ObservationFilter): PatientConstraint {
   const def = OBSERVATION_METRICS[filter.metric];
   // BloodPressure has systolic/diastolic; single-value metrics ignore `component`.
   const component: BloodPressureComponent | undefined =
@@ -591,7 +615,6 @@ async function findObservationMatches(
         : 'systolic'
       : undefined;
   const jsonKey = component === 'diastolic' ? def.keys[1] : def.keys[0];
-
   const valueExpr = Prisma.sql`(o.data->>${jsonKey})::numeric`;
   const predicate = observationPredicate(
     valueExpr,
@@ -599,44 +622,37 @@ async function findObservationMatches(
     filter.value,
     filter.value2,
   );
+  // Most-extreme first: smallest for </<= (we want the lowest passing value), largest otherwise.
+  const ascending = filter.operator === 'lt' || filter.operator === 'lte';
+  const direction = ascending ? Prisma.sql`ASC` : Prisma.sql`DESC`;
 
-  // DISTINCT ON keeps each patient's latest matching reading (recorded_time DESC). For this
-  // dataset there is exactly one reading per (patient, metric), so this is also "any/highest".
-  const rows = await prisma.$queryRaw<ObservationRankRow[]>`
-    SELECT DISTINCT ON (p.id)
-      p.id            AS "patientId",
-      ${valueExpr}    AS "value",
-      o.recorded_time AS "recordedTime"
-    FROM patient_observation o
-    JOIN patient p ON p.id = o.patient_id
-    WHERE p."group" = ${group}
-      AND o.data->>'type' = ${filter.metric}
-      AND ${predicate}
-    ORDER BY p.id, o.recorded_time DESC NULLS LAST
-  `;
-
-  const out = new Map<string, NonNullable<ConditionMatch['matchedObservation']>>();
-  for (const r of rows) {
-    out.set(r.patientId, {
-      metric: filter.metric,
-      component,
-      value: Number(r.value),
-      unit: def.unit,
-      recordedTime: r.recordedTime ? new Date(r.recordedTime).toISOString() : null,
-    });
-  }
-  return out;
-}
-
-/** Raw row from the medication filter query (one representative prescription per matching patient). */
-interface MedicationRankRow {
-  patientId: string;
-  description: string | null;
-  genericName: string | null;
-  strength: string | null;
-  strengthUnit: string | null;
-  directions: string | null;
-  narcotic: boolean | null;
+  return {
+    selectColumns: Prisma.sql`obs.value AS "obsValue", obs.recorded_time AS "obsRecordedTime"`,
+    // Inner LATERAL: a patient with no matching reading is dropped (the AND filter); the latest
+    // matching reading (recorded_time DESC) supplies the value for ranking and the citation.
+    lateralJoin: Prisma.sql`
+      JOIN LATERAL (
+        SELECT ${valueExpr} AS value, o.recorded_time
+        FROM patient_observation o
+        WHERE o.patient_id = p.id
+          AND o.data->>'type' = ${filter.metric}
+          AND ${predicate}
+        ORDER BY o.recorded_time DESC NULLS LAST
+        LIMIT 1
+      ) obs ON true`,
+    orderBy: Prisma.sql`obs.value ${direction}`,
+    annotate: (candidate, row) => {
+      candidate.matchedObservation = {
+        metric: filter.metric,
+        component,
+        value: Number(row.obsValue),
+        unit: def.unit,
+        recordedTime: row.obsRecordedTime
+          ? new Date(row.obsRecordedTime).toISOString()
+          : null,
+      };
+    },
+  };
 }
 
 /** Build a human-readable summary of a medication filter, e.g. "Tylenol/acetaminophen, 325 MG, Oral Tablet". */
@@ -676,75 +692,71 @@ const FORM_MATCH: Record<string, string> = {
 };
 
 /**
- * Medication search: DETERMINISTIC "which patients take drug X" lookup, optionally narrowed by
- * dose/form/route. No embeddings/vocabulary — the prescription's `description` already concatenates
- * name + dose + release + route + form + brand, so we AND substring (ILIKE) matches against that
- * single column: an OR-group over the name synonyms (also checking `generic_name`), then one
- * mandatory ILIKE per supplied dose/form/route token. Returns one entry per matching patient
- * (their most recently ordered matching prescription).
+ * Build the medication constraint for the Stage-2 query: an inner `LATERAL` that keeps only patients
+ * taking a matching drug and surfaces their most-recently-ordered matching prescription for the
+ * citation. No embeddings/vocabulary — the prescription's `description` already concatenates name +
+ * dose + release + route + form + brand, so the predicate is an OR-group over the name synonyms
+ * (against `description` and the sometimes-null `generic_name`) ANDed with one ILIKE per supplied
+ * dose/form/route token; route and form match by description STEM (Injection→"Inject", …) so
+ * inflected wording still matches.
  *
- * Cohort scoping is enforced in the SQL (`AND p."group" = ${group}`) via the patient join —
- * `patient_medication` has no group column, so this join is the ONLY path to the cohort boundary.
- * Injection-safe: every search term is a bound parameter (wrapped in `%…%` in JS, never
- * interpolated as SQL); there are no structural tokens taken from user text.
+ * Cohort scoping is enforced by the outer query's `p."group"` (the lateral reaches
+ * `patient_medication` only through `p`). Injection-safe: every search term is a bound `%…%` param —
+ * no structural token comes from user text.
  */
-async function findMedicationMatches(
-  prisma: PrismaService,
-  group: CohortGroup,
-  filter: MedicationFilter,
-): Promise<Map<string, NonNullable<ConditionMatch['matchedMedication']>>> {
+function buildMedicationConstraint(filter: MedicationFilter): PatientConstraint {
   // Name OR-group: any synonym may match the full description OR the (sometimes null) generic name.
   const nameOr = Prisma.join(
     filter.names.map(
-      (n) =>
-        Prisma.sql`(m.description ILIKE ${'%' + n + '%'} OR m.generic_name ILIKE ${'%' + n + '%'})`,
+      (name) =>
+        Prisma.sql`(m.description ILIKE ${'%' + name + '%'} OR m.generic_name ILIKE ${'%' + name + '%'})`,
     ),
     ' OR ',
   );
-  // Each supplied attribute is an additional constraint that must appear in the description (AND).
-  // Route/form are matched by their description STEM (Injection→"Inject", Inhalation→"Inhal", …) so
-  // inflected wording ("Injectable Solution") still matches; unknown tokens match verbatim.
-  const conds: Prisma.Sql[] = [Prisma.sql`(${nameOr})`];
+  // Each supplied attribute is an additional ILIKE that must appear in the description (AND).
+  const predicates: Prisma.Sql[] = [Prisma.sql`(${nameOr})`];
   if (filter.doseText)
-    conds.push(Prisma.sql`m.description ILIKE ${'%' + filter.doseText + '%'}`);
+    predicates.push(Prisma.sql`m.description ILIKE ${'%' + filter.doseText + '%'}`);
   if (filter.form) {
     const formToken = FORM_MATCH[filter.form] ?? filter.form;
-    conds.push(Prisma.sql`m.description ILIKE ${'%' + formToken + '%'}`);
+    predicates.push(Prisma.sql`m.description ILIKE ${'%' + formToken + '%'}`);
   }
   if (filter.route) {
     const routeToken = ROUTE_MATCH[filter.route] ?? filter.route;
-    conds.push(Prisma.sql`m.description ILIKE ${'%' + routeToken + '%'}`);
+    predicates.push(Prisma.sql`m.description ILIKE ${'%' + routeToken + '%'}`);
   }
-  const predicate = Prisma.join(conds, ' AND ');
+  const predicate = Prisma.join(predicates, ' AND ');
 
-  const rows = await prisma.$queryRaw<MedicationRankRow[]>`
-    SELECT DISTINCT ON (p.id)
-      p.id           AS "patientId",
-      m.description  AS "description",
-      m.generic_name AS "genericName",
-      m.strength     AS "strength",
-      m.strength_unit AS "strengthUnit",
-      m.directions   AS "directions",
-      m.narcotic     AS "narcotic"
-    FROM patient_medication m
-    JOIN patient p ON p.id = m.patient_id
-    WHERE p."group" = ${group}
-      AND (${predicate})
-    ORDER BY p.id, m.order_time DESC NULLS LAST
-  `;
-
-  const out = new Map<string, NonNullable<ConditionMatch['matchedMedication']>>();
-  for (const r of rows) {
-    out.set(r.patientId, {
-      description: r.description,
-      genericName: r.genericName,
-      strength: r.strength,
-      strengthUnit: r.strengthUnit,
-      directions: r.directions,
-      narcotic: r.narcotic,
-    });
-  }
-  return out;
+  return {
+    selectColumns: Prisma.sql`
+      med.description    AS "medDescription",
+      med.generic_name   AS "medGenericName",
+      med.strength       AS "medStrength",
+      med.strength_unit  AS "medStrengthUnit",
+      med.directions     AS "medDirections",
+      med.narcotic       AS "medNarcotic"`,
+    // Inner LATERAL: a patient with no matching prescription is dropped (the AND filter); the most
+    // recently ordered match supplies the citation columns.
+    lateralJoin: Prisma.sql`
+      JOIN LATERAL (
+        SELECT m.description, m.generic_name, m.strength, m.strength_unit, m.directions, m.narcotic
+        FROM patient_medication m
+        WHERE m.patient_id = p.id
+          AND (${predicate})
+        ORDER BY m.order_time DESC NULLS LAST
+        LIMIT 1
+      ) med ON true`,
+    annotate: (candidate, row) => {
+      candidate.matchedMedication = {
+        description: row.medDescription ?? null,
+        genericName: row.medGenericName ?? null,
+        strength: row.medStrength ?? null,
+        strengthUnit: row.medStrengthUnit ?? null,
+        directions: row.medDirections ?? null,
+        narcotic: row.medNarcotic ?? null,
+      };
+    },
+  };
 }
 
 /** Identity path: resolve by id/name within the active cohort, return full records. */
@@ -765,25 +777,283 @@ async function findByIdentity(
   return patients.map(toPatientDetail);
 }
 
+// HNSW search breadth. pgvector's index returns at most `hnsw.ef_search` candidates per scan, so it
+// MUST be ≥ CONCEPT_LIMIT or the ANN search would under-return concepts at scale. SET LOCAL (below)
+// scopes it to the resolution transaction; it's a harmless no-op when the planner picks an exact scan
+// (tiny vocab). Requires pgvector ≥ 0.8 for iterative-scan-aware behavior (this project ships 0.8.2).
+const HNSW_EF_SEARCH = 100;
+
+/**
+ * Shared Stage-1 scaffolding: embed the query ONCE (outside the txn, so the OpenAI round-trip doesn't
+ * hold a DB connection), then run the caller's vocabulary top-K inside a transaction that sets
+ * `hnsw.ef_search` for correct ANN recall. Cohort-AGNOSTIC by design — the vocabulary carries no
+ * group, so the cohort filter belongs on the Stage-2 patient join, never here.
+ */
+async function resolveConcepts<Row>(
+  prisma: PrismaService,
+  embeddings: EmbeddingsService,
+  query: string,
+  run: (tx: Prisma.TransactionClient, qvec: string) => Promise<Row[]>,
+): Promise<Row[]> {
+  const qvec = toVectorLiteral(await embeddings.embedQuery(query));
+  return prisma.$transaction(async (tx) => {
+    // HNSW_EF_SEARCH is a code constant (never user input) and SET rejects bind params, so inline it.
+    await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${HNSW_EF_SEARCH}`);
+    return run(tx, qvec);
+  });
+}
+
+/**
+ * Stage 1 — CONCEPT RESOLUTION (condition). Pull the top-CONCEPT_LIMIT closest ICD codes from the
+ * shared vocabulary by cosine distance and keep those at/above SIMILARITY_THRESHOLD. The bare
+ * `ORDER BY embedding <=> qvec LIMIT k` shape is exactly what the HNSW index serves; the threshold is
+ * applied to the ≤k returned rows (NOT as an index-defeating range predicate).
+ */
+async function resolveConditionConcepts(
+  prisma: PrismaService,
+  embeddings: EmbeddingsService,
+  query: string,
+): Promise<ConditionConcept[]> {
+  const rows = await resolveConcepts(
+    prisma,
+    embeddings,
+    query,
+    (tx, qvec) =>
+      tx.$queryRaw<ConditionConcept[]>`
+        SELECT code, description, 1 - (embedding <=> ${qvec}::vector) AS similarity
+        FROM icd_code
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> ${qvec}::vector
+        LIMIT ${CONCEPT_LIMIT}
+      `,
+  );
+  return rows
+    .map((row) => ({
+      code: row.code,
+      description: row.description,
+      similarity: Number(row.similarity),
+    }))
+    .filter((concept) => concept.similarity >= SIMILARITY_THRESHOLD);
+}
+
+/** Stage 1 — CONCEPT RESOLUTION (allergy): same top-K shape against the canonical allergen vocabulary. */
+async function resolveAllergenConcepts(
+  prisma: PrismaService,
+  embeddings: EmbeddingsService,
+  query: string,
+): Promise<AllergenConcept[]> {
+  const rows = await resolveConcepts(
+    prisma,
+    embeddings,
+    query,
+    (tx, qvec) =>
+      tx.$queryRaw<AllergenConcept[]>`
+        SELECT id, canonical_name AS "canonicalName", category,
+               1 - (embedding <=> ${qvec}::vector) AS similarity
+        FROM allergen
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> ${qvec}::vector
+        LIMIT ${CONCEPT_LIMIT}
+      `,
+  );
+  return rows
+    .map((row) => ({
+      id: row.id,
+      canonicalName: row.canonicalName,
+      category: row.category,
+      similarity: Number(row.similarity),
+    }))
+    .filter((concept) => concept.similarity >= SIMILARITY_THRESHOLD);
+}
+
+/**
+ * Build the condition constraint for the Stage-2 patient query: an inner `LATERAL` that keeps only
+ * patients carrying one of the resolved ICD codes and surfaces their best-matching (highest cosine)
+ * diagnosis. The resolved `(code, similarity)` pairs are passed as an inline `VALUES` table joined to
+ * `patient_condition` on the code — so the patient lookup is a plain indexed equality join (see the
+ * `(icd_10_code, patient_id)` index), NOT another vector scan. Cohort scoping is enforced by the
+ * outer query's `p."group"` (the lateral reaches `patient_condition` only through `p`). Injection-
+ * safe: every code + similarity is a bound parameter.
+ */
+function buildConditionConstraint(concepts: ConditionConcept[]): PatientConstraint {
+  const conceptByCode = new Map(concepts.map((concept) => [concept.code, concept]));
+  const values = Prisma.join(
+    concepts.map(
+      (concept) =>
+        Prisma.sql`(${concept.code}::text, ${concept.similarity}::double precision)`,
+    ),
+    ', ',
+  );
+  return {
+    selectColumns: Prisma.sql`cond.code AS "condCode", cond.sim AS "condSim"`,
+    lateralJoin: Prisma.sql`
+      JOIN LATERAL (
+        SELECT v.code, v.sim
+        FROM patient_condition c
+        JOIN (VALUES ${values}) AS v(code, sim) ON v.code = c.icd_10_code
+        WHERE c.patient_id = p.id
+        ORDER BY v.sim DESC
+        LIMIT 1
+      ) cond ON true`,
+    similarityCol: Prisma.sql`cond.sim`,
+    annotate: (candidate, row) => {
+      if (row.condCode == null) return;
+      const concept = conceptByCode.get(row.condCode);
+      candidate.matchedCondition = {
+        icd10Code: row.condCode,
+        icd10Description: concept?.description ?? '',
+        similarity: Number(row.condSim),
+      };
+    },
+  };
+}
+
+/**
+ * Build the allergy constraint for the Stage-2 patient query: an inner `LATERAL` over
+ * `patient_allergy` joined to the resolved `(allergen_id, similarity)` pairs (indexed on
+ * `allergen_id`), surfacing the patient's best-matching allergen. Cohort scoping via the outer
+ * `p."group"`. Canonical name + category come from the already-resolved concept (no extra join).
+ */
+function buildAllergyConstraint(concepts: AllergenConcept[]): PatientConstraint {
+  const conceptById = new Map(concepts.map((concept) => [concept.id, concept]));
+  const values = Prisma.join(
+    concepts.map(
+      (concept) =>
+        Prisma.sql`(${concept.id}::text, ${concept.similarity}::double precision)`,
+    ),
+    ', ',
+  );
+  return {
+    selectColumns: Prisma.sql`alg.allergen_id AS "algId", alg.sim AS "algSim"`,
+    lateralJoin: Prisma.sql`
+      JOIN LATERAL (
+        SELECT v.allergen_id, v.sim
+        FROM patient_allergy pa
+        JOIN (VALUES ${values}) AS v(allergen_id, sim) ON v.allergen_id = pa.allergen_id
+        WHERE pa.patient_id = p.id
+        ORDER BY v.sim DESC
+        LIMIT 1
+      ) alg ON true`,
+    similarityCol: Prisma.sql`alg.sim`,
+    annotate: (candidate, row) => {
+      if (row.algId == null) return;
+      const concept = conceptById.get(row.algId);
+      candidate.matchedAllergy = {
+        canonicalName: concept?.canonicalName ?? row.algId,
+        category: concept?.category ?? null,
+        similarity: Number(row.algSim),
+      };
+    },
+  };
+}
+
+/**
+ * Run the single Stage-2 patient query. Each constraint contributes an inner `LATERAL` (filter +
+ * matched record) and its SELECT columns; the DB does the intersection, ranking, and `LIMIT` so Node
+ * never holds more than the final page (≤MAX_MATCHES) regardless of how many patients match one
+ * constraint. Ranking: by the measured value when an observation filter ran (its `orderBy`), else by
+ * the strongest cosine similarity across the fuzzy constraints (`GREATEST(...)`), else by patient id.
+ *
+ * Cohort scoping: `WHERE p."group" = ${group}` — every lateral reaches its table only through `p`.
+ * Injection-safe: table/column tokens are constants, the ORDER BY direction is a whitelisted
+ * fragment, and every value (group, ILIKE terms, JSON keys, numeric bounds, concept codes +
+ * similarities, limit) is a bound parameter.
+ */
+async function runPatientQuery(
+  prisma: PrismaService,
+  group: CohortGroup,
+  constraints: PatientConstraint[],
+): Promise<PatientRow[]> {
+  const selectColumns = Prisma.join(
+    constraints.map((constraint) => constraint.selectColumns),
+    ', ',
+  );
+  const lateralJoins = Prisma.join(
+    constraints.map((constraint) => constraint.lateralJoin),
+    ' ',
+  );
+  const observationOrderBy = constraints.find((constraint) => constraint.orderBy)?.orderBy;
+  const similarityCols = constraints
+    .map((constraint) => constraint.similarityCol)
+    .filter((col): col is Prisma.Sql => col !== undefined);
+  const orderBy = observationOrderBy
+    ? Prisma.sql`${observationOrderBy}, p.id`
+    : similarityCols.length > 0
+      ? Prisma.sql`GREATEST(${Prisma.join(similarityCols, ', ')}) DESC, p.id`
+      : Prisma.sql`p.id`;
+
+  return prisma.$queryRaw<PatientRow[]>(Prisma.sql`
+    SELECT
+      p.id AS "patientId",
+      ${selectColumns}
+    FROM patient p
+    ${lateralJoins}
+    WHERE p."group" = ${group}
+    ORDER BY ${orderBy}
+    LIMIT ${MAX_MATCHES}
+  `);
+}
+
+/** A candidate's strongest fuzzy similarity (condition or allergy); -1 when neither matched. */
+function bestSimilarity(candidate: Candidate): number {
+  return Math.max(
+    candidate.matchedCondition?.similarity ?? -1,
+    candidate.matchedAllergy?.similarity ?? -1,
+  );
+}
+
+/** Assemble the client-facing match: rounded similarities/value + a confidence derived from it. */
+function toConditionMatch(patient: PatientDetail, candidate: Candidate): ConditionMatch {
+  const matchedCondition = candidate.matchedCondition
+    ? {
+        ...candidate.matchedCondition,
+        similarity: Number(candidate.matchedCondition.similarity.toFixed(4)),
+      }
+    : undefined;
+  const matchedAllergy = candidate.matchedAllergy
+    ? {
+        ...candidate.matchedAllergy,
+        similarity: Number(candidate.matchedAllergy.similarity.toFixed(4)),
+      }
+    : undefined;
+  const matchedObservation = candidate.matchedObservation
+    ? {
+        ...candidate.matchedObservation,
+        value: Number(candidate.matchedObservation.value.toFixed(2)),
+      }
+    : undefined;
+  // A pure deterministic match (measurement and/or medication) is a definite pass ⇒ High; when a
+  // fuzzy condition/allergy is also present, confidence reflects that (the only uncertain part).
+  const confidence =
+    candidate.matchedCondition || candidate.matchedAllergy
+      ? toConfidence(bestSimilarity(candidate))
+      : ('High' as const);
+  return {
+    patient,
+    matchedCondition,
+    matchedAllergy,
+    matchedObservation,
+    matchedMedication: candidate.matchedMedication,
+    confidence,
+  };
+}
+
 /**
  * Attribute path: search ACROSS patients by condition, allergy, a measurement filter, and/or a
- * medication filter, in any combination.
+ * medication filter, in any combination. EVERY requested constraint ANDs (a returned patient matches
+ * all of them). Two stages keep memory flat regardless of how many patients match one constraint:
  *
- * Two kinds of constraint:
- *   • FUZZY (condition, allergy): embed the query → cosine-rank against the vocabulary (the
- *     `embedding` pgvector column on `icd_code` / `allergen`) → keep the best per patient. These
- *     UNION (a patient surfaced by either appears).
- *   • DETERMINISTIC (medication, observation): a patient's records either satisfy the predicate or
- *     not (no embeddings).
+ *   • Stage 1 — CONCEPT RESOLUTION (condition, allergy): embed → cosine-rank the cohort-agnostic
+ *     `icd_code` / `allergen` VOCABULARY, top-CONCEPT_LIMIT, threshold-filtered. A requested fuzzy
+ *     field that resolves to nothing can't match any patient → return early (safe fallback).
+ *   • Stage 2 — ONE cohort-scoped patient query whose inner LATERALs (condition, allergy, medication,
+ *     observation) intersect, rank, and `LIMIT MAX_MATCHES` IN THE DATABASE — so a single constraint
+ *     matching tens of thousands of patients never lands in Node, and there is no JS-side
+ *     intersection or per-constraint candidate cap that could drop a valid patient.
+ *   • Stage 3 — fetch FULL records for the final ≤MAX_MATCHES patients and assemble in ranked order.
  *
- * Combination rule (`applyDeterministic`): a deterministic filter INTERSECTS when any prior
- * constraint was REQUESTED (so "diabetics on metformin" keeps only patients matching both), and
- * SEEDS the candidate set when it is the first constraint (so "who's on Tylenol?" returns every
- * patient on the drug). Intersection is commutative, so medication/observation order is irrelevant.
- * Finally the surviving patients' FULL records are fetched in one query.
- *
- * Cohort scoping is enforced in every SQL statement (`AND p."group" = ${group}`), so no path can
- * surface a patient outside the active cohort.
+ * Cohort scoping is enforced in the Stage-2 query (`p."group" = ${group}`) and re-applied on the
+ * Stage-3 fetch (defense in depth), so no path can surface a patient outside the active cohort.
  */
 async function findByAttribute(
   prisma: PrismaService,
@@ -794,193 +1064,56 @@ async function findByAttribute(
   observationFilter?: ObservationFilter | null,
   medicationFilter?: MedicationFilter | null,
 ): Promise<ConditionMatch[]> {
-  const maxDistance = 1 - SIMILARITY_THRESHOLD;
-  const byPatient = new Map<string, Candidate>();
-  const upsert = (patientId: string): Candidate => {
-    let c = byPatient.get(patientId);
-    if (!c) {
-      c = { patientId };
-      byPatient.set(patientId, c);
-    }
-    return c;
-  };
+  // ── Stage 1: resolve fuzzy concepts against the shared vocabulary (cohort-agnostic), concurrently. ──
+  const [conditionConcepts, allergenConcepts] = await Promise.all([
+    conditionQuery
+      ? resolveConditionConcepts(prisma, embeddings, conditionQuery)
+      : Promise.resolve<ConditionConcept[]>([]),
+    allergyQuery
+      ? resolveAllergenConcepts(prisma, embeddings, allergyQuery)
+      : Promise.resolve<AllergenConcept[]>([]),
+  ]);
+  // A requested fuzzy field that matched no concept makes every intersection empty — stop now (this
+  // also keeps a fuzzy constraint from ever emitting an empty `VALUES ()`).
+  if (conditionQuery && conditionConcepts.length === 0) return [];
+  if (allergyQuery && allergenConcepts.length === 0) return [];
 
-  // ── Condition search: rank patient diagnoses against the ICD-10 vocabulary. ──
-  if (conditionQuery) {
-    const qvec = toVectorLiteral(await embeddings.embedQuery(conditionQuery));
-    const rows = await prisma.$queryRaw<ConditionRankRow[]>`
-      SELECT
-        p.id                 AS "patientId",
-        c.icd_10_code        AS "icd10Code",
-        c.icd_10_description AS "icd10Description",
-        1 - (ic.embedding <=> ${qvec}::vector) AS similarity
-      FROM icd_code ic
-      JOIN patient_condition c ON c.icd_10_code = ic.code
-      JOIN patient p           ON p.id = c.patient_id
-      WHERE ic.embedding IS NOT NULL
-        AND (ic.embedding <=> ${qvec}::vector) <= ${maxDistance}
-        AND p."group" = ${group}
-      ORDER BY similarity DESC
-      LIMIT ${CANDIDATE_LIMIT}
-    `;
-    for (const r of rows) {
-      const c = upsert(r.patientId);
-      if (!c.matchedCondition) {
-        c.matchedCondition = {
-          icd10Code: r.icd10Code,
-          icd10Description: r.icd10Description,
-          similarity: Number(r.similarity),
-        };
-      }
-    }
-  }
+  // ── Stage 2: assemble the AND-ed constraints and run ONE query that intersects, ranks, and limits
+  //    in the DATABASE. ──
+  const constraints: PatientConstraint[] = [];
+  if (conditionQuery) constraints.push(buildConditionConstraint(conditionConcepts));
+  if (allergyQuery) constraints.push(buildAllergyConstraint(allergenConcepts));
+  if (medicationFilter) constraints.push(buildMedicationConstraint(medicationFilter));
+  if (observationFilter) constraints.push(buildObservationConstraint(observationFilter));
+  // The caller only invokes this with ≥1 attribute; guard anyway so we never emit a constraint-less
+  // `SELECT … FROM patient` that would return the whole cohort.
+  if (constraints.length === 0) return [];
 
-  // ── Allergy search: rank patient allergies against the canonical allergen vocabulary. ──
-  if (allergyQuery) {
-    const qvec = toVectorLiteral(await embeddings.embedQuery(allergyQuery));
-    const rows = await prisma.$queryRaw<AllergyRankRow[]>`
-      SELECT
-        p.id             AS "patientId",
-        a.canonical_name AS "canonicalName",
-        a.category       AS "category",
-        1 - (a.embedding <=> ${qvec}::vector) AS similarity
-      FROM allergen a
-      JOIN patient_allergy pa ON pa.allergen_id = a.id
-      JOIN patient p          ON p.id = pa.patient_id
-      WHERE a.embedding IS NOT NULL
-        AND (a.embedding <=> ${qvec}::vector) <= ${maxDistance}
-        AND p."group" = ${group}
-      ORDER BY similarity DESC
-      LIMIT ${CANDIDATE_LIMIT}
-    `;
-    for (const r of rows) {
-      const c = upsert(r.patientId);
-      if (!c.matchedAllergy) {
-        c.matchedAllergy = {
-          canonicalName: r.canonicalName,
-          category: r.category,
-          similarity: Number(r.similarity),
-        };
-      }
-    }
-  }
+  const rows = await runPatientQuery(prisma, group, constraints);
+  if (rows.length === 0) return [];
 
-  // `hasCandidates` tracks whether any constraint has been REQUESTED so far — seeded from whether a
-  // fuzzy search ran, NOT from byPatient.size. This matters when a fuzzy search matched nothing:
-  // "diabetics on metformin" with zero diabetes hits must intersect an EMPTY set (→ no results),
-  // not let medication seed and return every metformin patient.
-  let hasCandidates = Boolean(conditionQuery || allergyQuery);
+  const candidates: Candidate[] = rows.map((row) => {
+    const candidate: Candidate = { patientId: row.patientId };
+    for (const constraint of constraints) constraint.annotate(candidate, row);
+    return candidate;
+  });
 
-  /**
-   * Fold one deterministic filter's hits into `byPatient`: INTERSECT when a prior constraint was
-   * requested (keep only existing candidates that also pass, annotating them), else SEED (each
-   * passing patient becomes a candidate). Any requested deterministic filter then forces later ones
-   * to intersect, so the filters compose as a logical AND regardless of order.
-   */
-  const applyDeterministic = <T>(
-    hits: Map<string, T>,
-    assign: (c: Candidate, hit: T) => void,
-  ): void => {
-    if (hasCandidates) {
-      for (const [patientId, c] of byPatient) {
-        const hit = hits.get(patientId);
-        if (hit) assign(c, hit);
-        else byPatient.delete(patientId);
-      }
-    } else {
-      for (const [patientId, hit] of hits) assign(upsert(patientId), hit);
-    }
-    hasCandidates = true;
-  };
-
-  // ── Medication filter: deterministic substring (ILIKE) match over the prescription text. ──
-  if (medicationFilter) {
-    const meds = await findMedicationMatches(prisma, group, medicationFilter);
-    applyDeterministic(meds, (c, hit) => {
-      c.matchedMedication = hit;
-    });
-  }
-
-  // ── Observation filter: deterministic numeric predicate over the JSONB `data` column. ──
-  if (observationFilter) {
-    const obs = await findObservationMatches(prisma, group, observationFilter);
-    applyDeterministic(obs, (c, hit) => {
-      c.matchedObservation = hit;
-    });
-  }
-
-  const bestSimilarity = (c: Candidate): number =>
-    Math.max(
-      c.matchedCondition?.similarity ?? -1,
-      c.matchedAllergy?.similarity ?? -1,
-    );
-
-  // Rank by the explicit numeric criterion when a measurement filter ran (most-extreme reading
-  // first; ascending for </<=), otherwise by the strongest similarity hit. A deterministic-only
-  // match (e.g. medication-only) has no similarity, so candidates tie at -1 and fall through to a
-  // stable id tie-break for reproducible ordering. Capped at MAX_MATCHES.
-  const ascending =
-    observationFilter?.operator === 'lt' || observationFilter?.operator === 'lte';
-  const ranked = [...byPatient.values()]
-    .sort((a, b) => {
-      if (observationFilter) {
-        const va = a.matchedObservation?.value ?? Number.NEGATIVE_INFINITY;
-        const vb = b.matchedObservation?.value ?? Number.NEGATIVE_INFINITY;
-        if (va !== vb) return ascending ? va - vb : vb - va;
-        return a.patientId < b.patientId ? -1 : a.patientId > b.patientId ? 1 : 0;
-      }
-      const bySim = bestSimilarity(b) - bestSimilarity(a);
-      if (bySim !== 0) return bySim;
-      return a.patientId < b.patientId ? -1 : a.patientId > b.patientId ? 1 : 0;
-    })
-    .slice(0, MAX_MATCHES);
-  if (ranked.length === 0) return [];
-
-  // Fetch the full records for the ranked patients in one query, then assemble in similarity order.
-  const patients = await prisma.patient.findMany({
-    where: { id: { in: ranked.map((r) => r.patientId) } },
+  // ── Stage 3: fetch FULL records for the final ≤MAX_MATCHES patients (group-scoped — defense in
+  //    depth) and assemble in the DB-ranked order. ──
+  const patientRecords = await prisma.patient.findMany({
+    where: { id: { in: candidates.map((candidate) => candidate.patientId) }, group },
     include: patientInclude,
   });
-  const byId = new Map(patients.map((p) => [p.id, toPatientDetail(p)]));
+  const patientDetailsById = new Map(
+    patientRecords.map((patient) => [patient.id, toPatientDetail(patient)]),
+  );
 
-  return ranked
-    .map((c): ConditionMatch | null => {
-      const patient = byId.get(c.patientId);
-      if (!patient) return null;
-      const matchedCondition = c.matchedCondition
-        ? {
-            ...c.matchedCondition,
-            similarity: Number(c.matchedCondition.similarity.toFixed(4)),
-          }
-        : undefined;
-      const matchedAllergy = c.matchedAllergy
-        ? {
-            ...c.matchedAllergy,
-            similarity: Number(c.matchedAllergy.similarity.toFixed(4)),
-          }
-        : undefined;
-      const matchedObservation = c.matchedObservation
-        ? {
-            ...c.matchedObservation,
-            value: Number(c.matchedObservation.value.toFixed(2)),
-          }
-        : undefined;
-      // A pure deterministic match (measurement and/or medication) is a definite pass ⇒ High; when
-      // a fuzzy condition/allergy is also present, confidence reflects that (the only uncertain part).
-      const confidence =
-        c.matchedCondition || c.matchedAllergy
-          ? toConfidence(bestSimilarity(c))
-          : ('High' as const);
-      return {
-        patient,
-        matchedCondition,
-        matchedAllergy,
-        matchedObservation,
-        matchedMedication: c.matchedMedication,
-        confidence,
-      };
+  return candidates
+    .map((candidate): ConditionMatch | null => {
+      const patient = patientDetailsById.get(candidate.patientId);
+      return patient ? toConditionMatch(patient, candidate) : null;
     })
-    .filter((m): m is ConditionMatch => m !== null);
+    .filter((match): match is ConditionMatch => match !== null);
 }
 
 /**

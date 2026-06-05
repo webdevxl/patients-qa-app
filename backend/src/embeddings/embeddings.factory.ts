@@ -12,9 +12,27 @@ import { OpenAIEmbeddings } from '@langchain/openai';
 export const EMBEDDING_MODEL = 'text-embedding-3-small';
 export const EMBEDDING_DIMENSIONS = 1536;
 
-/** Build a configured OpenAI embeddings client. Reads OPENAI_API_KEY from the environment. */
-export function createEmbeddingsClient(): OpenAIEmbeddings {
-  return new OpenAIEmbeddings({ model: EMBEDDING_MODEL });
+// Client-side resilience: a stalled embeddings call fails fast instead of inheriting the SDK's
+// ~10-minute default, and concurrency is bounded so a burst can't fan out unbounded to OpenAI.
+const EMBEDDING_TIMEOUT_MS = 15_000;
+const EMBEDDING_MAX_RETRIES = 2;
+const EMBEDDING_MAX_CONCURRENCY = 8;
+
+/**
+ * Build a configured OpenAI embeddings client. Reads OPENAI_API_KEY from the environment. `model` is
+ * a parameter (default {@link EMBEDDING_MODEL}) so the standalone Prisma backfill scripts can reuse
+ * this — but it MUST stay consistent with the committed `vector(1536)` artifacts: vectors from a
+ * different model are not comparable, so don't point this at an incompatible model.
+ */
+export function createEmbeddingsClient(
+  model: string = EMBEDDING_MODEL,
+): OpenAIEmbeddings {
+  return new OpenAIEmbeddings({
+    model,
+    timeout: EMBEDDING_TIMEOUT_MS,
+    maxRetries: EMBEDDING_MAX_RETRIES,
+    maxConcurrency: EMBEDDING_MAX_CONCURRENCY,
+  });
 }
 
 /**

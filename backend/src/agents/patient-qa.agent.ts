@@ -95,6 +95,16 @@ export const extractionSchema = z.object({
 
 export type Extraction = z.infer<typeof extractionSchema>;
 
+/** The all-null extraction: nothing identified, nothing to search → routes to the safe fallback. */
+export const EMPTY_EXTRACTION: Extraction = {
+  patientId: null,
+  name: null,
+  conditionQuery: null,
+  allergyQuery: null,
+  observationFilter: null,
+  medicationFilter: null,
+};
+
 /**
  * One prior conversation turn the client sends so the extractor can resolve follow-ups
  * ("what about his allergies?"). Only `user`/`assistant` are accepted; assistant content is a
@@ -122,13 +132,16 @@ export function sanitizeAndTrim(history: ChatTurn[] | undefined): ChatTurn[] {
   if (!Array.isArray(history)) return [];
   return history
     .filter(
-      (t): t is ChatTurn =>
-        !!t &&
-        (t.role === 'user' || t.role === 'assistant') &&
-        typeof t.content === 'string' &&
-        t.content.trim().length > 0,
+      (turn): turn is ChatTurn =>
+        !!turn &&
+        (turn.role === 'user' || turn.role === 'assistant') &&
+        typeof turn.content === 'string' &&
+        turn.content.trim().length > 0,
     )
-    .map((t) => ({ role: t.role, content: t.content.trim().slice(0, MAX_CONTENT_CHARS) }))
+    .map((turn) => ({
+      role: turn.role,
+      content: turn.content.trim().slice(0, MAX_CONTENT_CHARS),
+    }))
     .slice(-MAX_HISTORY_TURNS);
 }
 
@@ -158,47 +171,75 @@ export interface ExtractionUsage {
 export interface ExtractionResult {
   extraction: Extraction;
   usage?: ExtractionUsage;
+  /** True when the model refused / returned unparseable output and we substituted EMPTY_EXTRACTION. */
+  refused?: boolean;
 }
 
 export interface PatientQaExtractor {
   extract(question: string, history?: ChatTurn[]): Promise<ExtractionResult>;
 }
 
-/** Pull token usage off the raw AIMessage (shape: `usage_metadata`), if present. */
-function readUsage(raw: unknown): ExtractionUsage | undefined {
-  const u = (
-    raw as {
-      usage_metadata?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        total_tokens?: number;
-      };
-    } | null
-  )?.usage_metadata;
-  if (!u) return undefined;
+/** Nest DI token for the extractor, so `QaService` receives a mockable, config-driven instance. */
+export const PATIENT_QA_EXTRACTOR = Symbol('PATIENT_QA_EXTRACTOR');
+
+/** Pull token usage off the raw AIMessage (`usage_metadata`), if present. */
+function readUsage(raw: BaseMessage): ExtractionUsage | undefined {
+  const usage = (raw as AIMessage).usage_metadata;
+  if (!usage) return undefined;
   return {
-    inputTokens: u.input_tokens,
-    outputTokens: u.output_tokens,
-    totalTokens: u.total_tokens,
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    totalTokens: usage.total_tokens,
   };
+}
+
+/** Default chat model + sampling for the extractor; overridable via ConfigService at the DI layer. */
+export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini';
+export const DEFAULT_CHAT_TEMPERATURE = 0;
+// Client-side resilience so a slow/stalled OpenAI call fails FAST into the safe-fallback path
+// instead of inheriting the SDK's ~10-minute default and fanning out unbounded under load. Worst-
+// case wall time ≈ timeout × (1 + maxRetries), so keep retries low.
+const CHAT_TIMEOUT_MS = 15_000;
+const CHAT_MAX_RETRIES = 2;
+const CHAT_MAX_CONCURRENCY = 8;
+
+/** Tuning knobs for the chat model (model + temperature); resilience is fixed in {@link createChatModel}. */
+export interface ChatModelOptions {
+  model?: string;
+  temperature?: number;
+}
+
+/**
+ * Single place the OpenAI chat client is constructed (the extractor here + the Studio graph), so the
+ * model name, temperature, and resilience config live in ONE spot. Undefined options fall back to the
+ * defaults. Reads OPENAI_API_KEY from the environment (kept Nest-free so Studio/scripts can reuse it).
+ */
+export function createChatModel(options: ChatModelOptions = {}): ChatOpenAI {
+  return new ChatOpenAI({
+    model: options.model ?? DEFAULT_CHAT_MODEL,
+    temperature: options.temperature ?? DEFAULT_CHAT_TEMPERATURE,
+    timeout: CHAT_TIMEOUT_MS,
+    maxRetries: CHAT_MAX_RETRIES,
+    maxConcurrency: CHAT_MAX_CONCURRENCY,
+  });
 }
 
 /**
  * Build the patient Q&A EXTRACTOR: a single `withStructuredOutput` model call that pulls the
- * search parameters (patientId/name/conditionQuery/allergyQuery) out of the latest question,
+ * search parameters (patientId/name/conditionQuery/allergyQuery/…) out of the latest question,
  * using the trimmed conversation history only to resolve references ("his allergies").
  *
  * This REPLACES the old tool-calling agent. There is no agent loop and no tool execution here —
  * the model can only emit the fixed `extractionSchema` object (the core injection defense), and
- * `QaService` routes deterministically in code to the single `findPatients` retrieval. Same single
- * LLM call as before, but the routing/tie-breaks now live in testable code rather than the prompt.
+ * `QaService` routes deterministically in code to the single `findPatients` retrieval.
  *
- * `includeRaw: true` keeps the raw AIMessage so we can still log token usage (previously done by
- * the tracing middleware). Pure LangChain — no Nest decorators; reads OPENAI_API_KEY from env.
+ * On a refusal / unparseable output (e.g. an injection that trips OpenAI strict mode) `parsed` is
+ * null — we return an EXPLICIT {@link EMPTY_EXTRACTION} and flag `refused`, so routing reaches the
+ * safe fallback intentionally instead of throwing a downstream TypeError. `includeRaw: true` keeps
+ * the raw AIMessage for token-usage logging.
  */
-export function createPatientQaExtractor(): PatientQaExtractor {
-  const model = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0 });
-  const structured = model.withStructuredOutput(extractionSchema, {
+export function createPatientQaExtractor(options: ChatModelOptions = {}): PatientQaExtractor {
+  const structured = createChatModel(options).withStructuredOutput(extractionSchema, {
     name: 'extract_search_params',
     includeRaw: true,
   });
@@ -207,16 +248,18 @@ export function createPatientQaExtractor(): PatientQaExtractor {
     async extract(question: string, history: ChatTurn[] = []): Promise<ExtractionResult> {
       const messages: BaseMessage[] = [
         new SystemMessage(EXTRACTION_SYSTEM_PROMPT),
-        ...sanitizeAndTrim(history).map((t) =>
-          t.role === 'user' ? new HumanMessage(t.content) : new AIMessage(t.content),
+        ...sanitizeAndTrim(history).map((turn) =>
+          turn.role === 'user'
+            ? new HumanMessage(turn.content)
+            : new AIMessage(turn.content),
         ),
         new HumanMessage(question),
       ];
-      const res = (await structured.invoke(messages)) as {
-        raw: unknown;
-        parsed: Extraction;
-      };
-      return { extraction: res.parsed, usage: readUsage(res.raw) };
+      const { raw, parsed } = await structured.invoke(messages);
+      if (parsed == null) {
+        return { extraction: EMPTY_EXTRACTION, usage: readUsage(raw), refused: true };
+      }
+      return { extraction: parsed, usage: readUsage(raw) };
     },
   };
 }
