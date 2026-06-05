@@ -14,6 +14,7 @@ import {
   type PatientDetail,
   type ConditionMatch,
 } from '../agents/tools/find-patients.tool';
+import type { CohortGroup } from '../auth/cohort.types';
 
 /**
  * Response returned to the client. The model only extracts search params — it never composes
@@ -43,8 +44,9 @@ const fullName = (p: PatientDetail): string =>
  * Thin bridge between the HTTP layer and the LangChain extractor. Builds the stateless extractor
  * once and, per request: (1) extracts search params from the question + trimmed history in ONE
  * model call, (2) routes deterministically in code (identity wins), (3) calls the matching
- * retrieval function, (4) shapes the response. No second model pass; the model never sees the
- * retrieved records. No cohort scoping yet — searches span all patients for now.
+ * retrieval function — scoped to the caller's cohort, (4) shapes the response. No second model
+ * pass; the model never sees the retrieved records. Every read is confined to `group`, so a
+ * patient in the other cohort is simply never found (→ safe fallback).
  */
 @Injectable()
 export class QaService {
@@ -56,11 +58,15 @@ export class QaService {
     private readonly embeddings: EmbeddingsService,
   ) {}
 
-  async query(question: string, history: ChatTurn[] = []): Promise<QaResult> {
+  async query(
+    group: CohortGroup,
+    question: string,
+    history: ChatTurn[] = [],
+  ): Promise<QaResult> {
     const traceId = randomUUID().slice(0, 8);
     const startedAt = Date.now();
     this.logger.log(
-      `🏁 [${traceId}] qa query — "${question}" (history: ${history.length} turn(s))`,
+      `🏁 [${traceId}] qa query — cohort ${group} — "${question}" (history: ${history.length} turn(s))`,
     );
 
     // ── 1. Extract (the only LLM call). A malformed/failed extraction degrades to the safe
@@ -86,6 +92,7 @@ export class QaService {
       this.prisma,
       this.embeddings,
       extraction,
+      group,
     );
 
     if (r.matchCount === 0) {

@@ -73,7 +73,7 @@ export interface PatientDetail {
   ethnicityDescription: string | null;
   legalMailingAddress: unknown;
   status: string | null;
-  group: string;
+  group: CohortGroup;
   email: string | null;
   phone: string | null;
   outpatient: boolean | null;
@@ -156,12 +156,21 @@ export class ApiError extends Error {
   }
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE_URL}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        // The session token is already a ready-to-use Basic credential — the backend minted it
+        // as base64("<jwt>:"), so we just echo it back. Omitted on the group-selection call.
+        ...(token ? { Authorization: `Basic ${token}` } : {}),
+      },
       body: JSON.stringify(body),
     });
   } catch (e) {
@@ -176,14 +185,28 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 /**
- * Ask a cohort-scoped question. The backend's `/qa/query` route extracts search params from the
- * question (using `history` to resolve follow-up references) and returns the grounded result.
- * History is client-supplied (stateless backend); the cohort is sent explicitly.
+ * Select a cohort and obtain a session token. This is the only unauthenticated call — its result
+ * (`token`) authorizes every subsequent request and encodes (server-side, signed) which group the
+ * caller may see. The client treats the token as opaque.
  */
-export function postQaQuery(params: {
-  group: CohortGroup;
-  question: string;
-  history?: ChatTurn[];
-}): Promise<QaResult> {
-  return postJson<QaResult>('/qa/query', params);
+export function postSelectGroup(
+  group: CohortGroup,
+): Promise<{ token: string; group: CohortGroup }> {
+  return postJson<{ token: string; group: CohortGroup }>('/auth/session', {
+    group,
+  });
+}
+
+/**
+ * Ask a cohort-scoped question. `token` is the session credential (required) and is a separate
+ * argument from the body payload precisely because it's transport/auth, not request data — it's
+ * sent as the Basic auth header, never in the body. The backend derives the active cohort from the
+ * token (never the body), so the client cannot ask outside its group. `history` is client-supplied
+ * (stateless backend) to resolve follow-up references.
+ */
+export function postQaQuery(
+  token: string,
+  body: { question: string; history?: ChatTurn[] },
+): Promise<QaResult> {
+  return postJson<QaResult>('/qa/query', body, token);
 }

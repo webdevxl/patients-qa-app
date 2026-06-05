@@ -2,9 +2,9 @@
 //
 // This is the UI-layer expression of the app's central safety invariant — there is
 // always exactly ONE active cohort, and every screen reads it from here rather than
-// passing it around ad hoc. Today the session is just the chosen group; once the
-// backend's group-selection endpoint exists (build-out plan #1), the returned
-// session token slots into `token` with no change to consumers.
+// passing it around ad hoc. A session always carries the backend-issued session token
+// (minted by the group-selection endpoint), so `token` is required — there is no valid
+// authenticated state without it.
 import React, {
   createContext,
   useCallback,
@@ -16,14 +16,14 @@ import type { CohortGroup } from '../theme/palette';
 
 export interface Session {
   group: CohortGroup;
-  /** Basic-auth session token from the backend. Reserved for build-out plan #1. */
-  token?: string;
+  /** Basic-auth session token from the backend, sent on every authenticated request. */
+  token: string;
 }
 
 interface SessionContextValue {
   session: Session | null;
-  /** Enter a cohort. `clearCohort` is the only way back out (explicit switch). */
-  selectCohort: (group: CohortGroup, token?: string) => void;
+  /** Enter a cohort with the token minted for it. `clearCohort` is the only way back out. */
+  selectCohort: (group: CohortGroup, token: string) => void;
   clearCohort: () => void;
 }
 
@@ -32,7 +32,7 @@ const SessionContext = createContext<SessionContextValue | null>(null);
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
 
-  const selectCohort = useCallback((group: CohortGroup, token?: string) => {
+  const selectCohort = useCallback((group: CohortGroup, token: string) => {
     setSession({ group, token });
   }, []);
 

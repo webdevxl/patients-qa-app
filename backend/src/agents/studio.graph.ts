@@ -40,7 +40,8 @@ const model = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0 });
 // `createAgent` returns a compiled LangGraph graph — Studio renders and runs it directly.
 export const graph = createAgent({
   model,
-  tools: [createFindPatientsTool(prisma, embeddings)],
+  // Studio runs outside the HTTP auth flow; pin it to a single cohort for dev exploration.
+  tools: [createFindPatientsTool(prisma, embeddings, 'A')],
   systemPrompt: STUDIO_SYSTEM_PROMPT,
   middleware: [createTerminateAfterToolMiddleware(), createTracingMiddleware()],
 });

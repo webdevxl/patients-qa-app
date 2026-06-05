@@ -15,11 +15,31 @@ import { cohortTheme, palette } from '../theme/palette';
 import type { CohortGroup } from '../theme/palette';
 
 interface CohortSelectScreenProps {
-  onSelect: (group: CohortGroup) => void;
+  /** Exchange the chosen cohort for a session token. Rejects if the backend is unreachable. */
+  onSelect: (group: CohortGroup) => Promise<void>;
 }
 
 export function CohortSelectScreen({ onSelect }: CohortSelectScreenProps) {
   const [pending, setPending] = useState<CohortGroup | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const confirm = async () => {
+    if (!pending || submitting) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      // On success the app swaps to the chat screen, unmounting this one — no need to reset state.
+      await onSelect(pending);
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? e.message
+          : 'Could not start a session. Please try again.',
+      );
+      setSubmitting(false);
+    }
+  };
 
   return (
     <Screen>
@@ -84,7 +104,7 @@ export function CohortSelectScreen({ onSelect }: CohortSelectScreenProps) {
               key={meta.group}
               meta={meta}
               selected={pending === meta.group}
-              onPress={() => setPending(meta.group)}
+              onPress={() => !submitting && setPending(meta.group)}
             />
           ))}
         </YStack>
@@ -92,11 +112,30 @@ export function CohortSelectScreen({ onSelect }: CohortSelectScreenProps) {
         {/* Spacer pushes the CTA toward the bottom on tall screens */}
         <YStack flex={1} minHeight={24} />
 
+        {/* Connection error (e.g. backend unreachable) — clears on the next attempt */}
+        {error ? (
+          <XStack
+            alignItems="center"
+            gap={8}
+            marginBottom={12}
+            paddingVertical={10}
+            paddingHorizontal={12}
+            borderRadius={12}
+            backgroundColor="rgba(255,59,48,0.10)"
+          >
+            <Ionicons name="alert-circle" size={16} color={palette.red} />
+            <Text fontSize={13} color={palette.red} fontWeight="500" flex={1} letterSpacing={-0.1}>
+              {error}
+            </Text>
+          </XStack>
+        ) : null}
+
         {/* Confirm */}
         <PrimaryButton
           label={pending ? `Continue as ${cohortMeta(pending).label}` : 'Select a cohort'}
-          onPress={() => pending && onSelect(pending)}
+          onPress={confirm}
           disabled={!pending}
+          loading={submitting}
           color={pending ? cohortTheme[pending].accent : undefined}
           iconAfter="arrow-forward"
         />

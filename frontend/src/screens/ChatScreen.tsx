@@ -26,6 +26,8 @@ import type { CohortGroup } from '../theme/palette';
 
 interface ChatScreenProps {
   group: CohortGroup;
+  /** Session token from group selection; sent as Basic auth on every query. */
+  token: string;
   onSwitchCohort: () => void;
 }
 
@@ -43,8 +45,11 @@ interface ChatScreenProps {
 // returning the top-matching patients (capped at 5). Counts below are total patients with that
 // allergen in the data.
 //
-// Cohort-agnostic: isolation is currently off (the agent searches every patient), so the same
-// prompts are shown for whichever group is selected and resolve regardless of A/B.
+// Cohort isolation is now enforced: every query is scoped to the selected group, so these static
+// starter prompts resolve only when the referenced patient/allergen lives in the active cohort —
+// the same chip can return a real record in one group and the safe fallback in the other. (A
+// per-cohort suggestion set is a follow-up; left static here so the chips also demonstrate the
+// boundary.)
 const SUGGESTIONS: { label: string; text: string }[] = [
   {
     // 1) By full name
@@ -111,7 +116,7 @@ function conditionIntro(matches: ConditionMatch[]): string {
   return `Found ${n} patient${n === 1 ? '' : 's'} with a matching ${what} — each shown below. Ask about one by name for the full record.`;
 }
 
-export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
+export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
   const meta = cohortMeta(group);
   const accent = cohortTheme[group].accent;
   const scrollRef = useRef<ScrollView>(null);
@@ -157,7 +162,7 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
       .slice(-8);
 
     try {
-      const result = await postQaQuery({ group, question, history });
+      const result = await postQaQuery(token, { question, history });
       // The backend routes to one retrieval: `patients` (full record) or `matches`
       // (condition/allergy search). Either array may be absent, so guard before reading length.
       let answerMsg: ChatMessage;
@@ -189,6 +194,12 @@ export function ChatScreen({ group, onSwitchCohort }: ChatScreenProps) {
       }
       setMessages((prev) => [...prev, answerMsg]);
     } catch (e) {
+      // A 401 means the session token is missing/expired/invalid — drop back to the picker so a
+      // fresh one is minted, rather than leaving the user stuck on a screen that can't answer.
+      if (e instanceof ApiError && e.status === 401) {
+        onSwitchCohort();
+        return;
+      }
       const text =
         e instanceof ApiError
           ? e.message

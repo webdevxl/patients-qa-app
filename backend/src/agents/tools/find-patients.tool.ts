@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
 import type { EmbeddingsService } from '../../embeddings/embeddings.service';
 import { toVectorLiteral } from '../../embeddings/embeddings.factory';
+import type { CohortGroup } from '../../auth/cohort.types';
 
 /**
  * THE single patient-retrieval tool. It resolves patients two ways and the caller need not choose
@@ -129,7 +130,7 @@ export interface PatientDetail {
   ethnicityDescription: string | null;
   legalMailingAddress: unknown;
   status: string | null;
-  group: string;
+  group: CohortGroup;
   email: string | null;
   phone: string | null;
   outpatient: boolean | null;
@@ -235,7 +236,9 @@ export function toPatientDetail(p: PatientWithRecords): PatientDetail {
     ethnicityDescription: p.ethnicityDescription,
     legalMailingAddress: p.legalMailingAddress,
     status: p.status,
-    group: p.group,
+    // Prisma types the column as `string`; the data only ever holds 'A'/'B' and retrieval is
+    // already scoped by a validated CohortGroup, so narrow it at this boundary.
+    group: p.group as CohortGroup,
     email: p.email,
     phone: p.phone,
     outpatient: p.outpatient,
@@ -308,14 +311,16 @@ export function toPatientDetail(p: PatientWithRecords): PatientDetail {
  *                     last='Ricker' and a single token matches either.
  *   3. neither     -> null: no criteria, so we skip the DB (never list all patients).
  *
- * Cohort scoping is intentionally not applied yet — the search spans every patient.
+ * Cohort scoping is ALWAYS applied: `group` is ANDed into every branch, so even an exact id match
+ * resolves nothing when that patient belongs to the other cohort.
  */
-function buildWhere(patientId?: string, name?: string) {
-  if (patientId) return { id: patientId };
+function buildWhere(group: CohortGroup, patientId?: string, name?: string) {
+  if (patientId) return { id: patientId, group };
 
   const tokens = name?.trim().split(/\s+/).filter(Boolean) ?? [];
   if (tokens.length) {
     return {
+      group,
       AND: tokens.map((token) => ({
         OR: [
           { nameFirst: { contains: token, mode: 'insensitive' as const } },
@@ -360,13 +365,14 @@ function toConfidence(similarity: number): ConditionMatch['confidence'] {
   return 'Low';
 }
 
-/** Identity path: resolve by id/name, return full records. */
+/** Identity path: resolve by id/name within the active cohort, return full records. */
 async function findByIdentity(
   prisma: PrismaService,
+  group: CohortGroup,
   patientId?: string,
   name?: string,
 ): Promise<PatientDetail[]> {
-  const where = buildWhere(patientId, name);
+  const where = buildWhere(group, patientId, name);
   if (!where) return [];
   const patients = await prisma.patient.findMany({
     where,
@@ -385,11 +391,13 @@ async function findByIdentity(
  * match per patient → fetch those patients' FULL records in one query. When BOTH a condition and
  * an allergy are given, a patient surfaced by both carries both hits; ranking uses the strongest.
  *
- * Cohort scoping is intentionally NOT applied; the SQL marks the predicate that re-enables it.
+ * Cohort scoping is enforced in the SQL itself (`AND p."group" = ${group}`), so the similarity
+ * search can only ever surface patients in the active cohort.
  */
 async function findByAttribute(
   prisma: PrismaService,
   embeddings: EmbeddingsService,
+  group: CohortGroup,
   conditionQuery?: string,
   allergyQuery?: string,
 ): Promise<ConditionMatch[]> {
@@ -418,7 +426,7 @@ async function findByAttribute(
       JOIN patient p           ON p.id = c.patient_id
       WHERE ic.embedding IS NOT NULL
         AND (ic.embedding <=> ${qvec}::vector) <= ${maxDistance}
-      -- Cohort scoping intentionally OFF. To re-enable, add:  AND p."group" = <activeCohort>
+        AND p."group" = ${group}
       ORDER BY similarity DESC
       LIMIT ${CANDIDATE_LIMIT}
     `;
@@ -448,7 +456,7 @@ async function findByAttribute(
       JOIN patient p          ON p.id = pa.patient_id
       WHERE a.embedding IS NOT NULL
         AND (a.embedding <=> ${qvec}::vector) <= ${maxDistance}
-      -- Cohort scoping intentionally OFF. To re-enable, add:  AND p."group" = <activeCohort>
+        AND p."group" = ${group}
       ORDER BY similarity DESC
       LIMIT ${CANDIDATE_LIMIT}
     `;
@@ -513,11 +521,16 @@ async function findByAttribute(
  * specific patient (full records), otherwise a condition/allergy runs the semantic search
  * (ranked matches). Plain async fn so `QaService` calls it directly after extraction; also wrapped
  * as the single LangChain tool below.
+ *
+ * `group` is mandatory and threaded into EVERY query path — there is intentionally no way to call
+ * this unscoped, which is what keeps the cohort boundary an enforced invariant rather than a
+ * convention the caller has to remember.
  */
 export async function findPatients(
   prisma: PrismaService,
   embeddings: EmbeddingsService,
   input: FindPatientsInput,
+  group: CohortGroup,
 ): Promise<FindPatientsResult> {
   const patientId = input.patientId?.trim() || undefined;
   const name = input.name?.trim() || undefined;
@@ -527,7 +540,7 @@ export async function findPatients(
 
   // Identity wins: a specific patient beats a co-mentioned condition/allergy.
   if (patientId || name) {
-    const patients = await findByIdentity(prisma, patientId, name);
+    const patients = await findByIdentity(prisma, group, patientId, name);
     return { query, matchCount: patients.length, patients };
   }
 
@@ -535,6 +548,7 @@ export async function findPatients(
     const matches = await findByAttribute(
       prisma,
       embeddings,
+      group,
       conditionQuery,
       allergyQuery,
     );
@@ -546,15 +560,17 @@ export async function findPatients(
 
 /**
  * Factory: wraps {@link findPatients} as the single LangChain tool (retained so `langgraphjs dev`
- * studio works); the HTTP path calls `findPatients` directly after the extraction step.
+ * studio works); the HTTP path calls `findPatients` directly after the extraction step. Studio
+ * runs outside the auth flow, so the cohort is bound here at creation time (the caller pins one).
  */
 export function createFindPatientsTool(
   prisma: PrismaService,
   embeddings: EmbeddingsService,
+  group: CohortGroup,
 ) {
   return tool(
     (input: FindPatientsToolInput): Promise<FindPatientsResult> =>
-      findPatients(prisma, embeddings, input),
+      findPatients(prisma, embeddings, input, group),
     {
       name: 'find_patients',
       description: `Find patient(s). ONE tool for both lookups — set whichever field(s) apply:

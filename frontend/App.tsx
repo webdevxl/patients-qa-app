@@ -12,14 +12,30 @@ import config from './tamagui.config';
 import { SessionProvider, useSession } from './src/state/SessionProvider';
 import { CohortSelectScreen } from './src/screens/CohortSelectScreen';
 import { ChatScreen } from './src/screens/ChatScreen';
+import { postSelectGroup } from './src/api/client';
 
 function Root() {
   const { session, selectCohort, clearCohort } = useSession();
 
   if (!session) {
-    return <CohortSelectScreen onSelect={(group) => selectCohort(group)} />;
+    // Exchange the chosen cohort for a session token, then enter the chat. Errors propagate to
+    // CohortSelectScreen, which surfaces them and re-enables the button for a retry.
+    return (
+      <CohortSelectScreen
+        onSelect={async (group) => {
+          const { token } = await postSelectGroup(group);
+          selectCohort(group, token);
+        }}
+      />
+    );
   }
-  return <ChatScreen group={session.group} onSwitchCohort={clearCohort} />;
+  return (
+    <ChatScreen
+      group={session.group}
+      token={session.token}
+      onSwitchCohort={clearCohort}
+    />
+  );
 }
 
 export default function App() {
