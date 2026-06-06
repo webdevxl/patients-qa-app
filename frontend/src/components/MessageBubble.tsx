@@ -8,7 +8,7 @@ import React from 'react';
 import { XStack, YStack, Text } from 'tamagui';
 import { Ionicons } from '@expo/vector-icons';
 import { palette, radius, cardShadow } from '../theme/palette';
-import type { CandidateItem } from '../api/client';
+import type { AgentName, CandidateItem } from '../api/client';
 
 export type Role = 'user' | 'assistant';
 export type Confidence = 'High' | 'Medium' | 'Low';
@@ -30,6 +30,13 @@ export interface ChatMessage {
    * can resolve follow-up references ("what about his allergies?") without re-sending records.
    */
   contextSummary?: string;
+  /**
+   * Which phase produced this message — carried into the `history` turn so the backend can scope the
+   * answer-patient agent to answer-phase turns only. Optional here: the greeting and error/system
+   * bubbles have no phase and never enter history. `patientId` is set on answer-phase turns.
+   */
+  agentName?: AgentName;
+  patientId?: string;
   /** Marks the safe-fallback / system notices so they can read differently. */
   pending?: boolean;
 }

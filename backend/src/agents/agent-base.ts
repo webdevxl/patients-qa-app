@@ -12,12 +12,24 @@ import type { RunnableConfig } from '@langchain/core/runnables';
 // ───────────────────────────────── constants ─────────────────────────────────
 
 /**
- * Safe fallback string (used verbatim per the spec) for when no patient can be resolved or a
- * question can't be answered from the records. `QaService` returns this whenever extraction yields
- * nothing routable, a retrieval matches nothing, an answer isn't grounded, or anything fails.
+ * The find-patient fallback string (used verbatim per the spec). `QaService` returns this on the
+ * FIND path (extraction yields nothing routable / a retrieval matches nothing) and, critically, on
+ * the answer path's COHORT-BOUNDARY block — an unknown or cross-cohort patient id must stay
+ * indistinguishable, so that case keeps this exact wording. A grounded answer the answerer simply
+ * can't support uses the friendlier {@link ANSWER_FALLBACK} instead.
  */
-export const SAFE_FALLBACK =
+export const FIND_PATIENT_FALLBACK =
   'I cannot find a matching patient in your cohort, or I cannot answer this question based on the available records.';
+
+/**
+ * Friendlier fallback for the ANSWER path: a patient is already resolved, so the find-style
+ * "…in your cohort…" wording is both wrong and needlessly cold. Used when the answerer can't ground
+ * a reply in THIS patient's records (records silent, off-topic, or an injection refusal) or hits a
+ * generic error. NOT used for the cohort-boundary block — that stays the verbatim {@link
+ * FIND_PATIENT_FALLBACK} so a foreign/unknown id can't be told apart.
+ */
+export const ANSWER_FALLBACK =
+  "I can't find that information in this patient's records. Is there anything else I can help you with?";
 
 /** Keep at most this many prior turns — generous so the agent has the full conversation context,
  *  while still bounding token spend + injection surface on a long chat. */
@@ -45,19 +57,39 @@ const CHAT_MAX_CONCURRENCY = 8;
 // ──────────────────────────── conversation history ───────────────────────────
 
 /**
+ * Which agent/phase produced a conversation turn. The client tags every history turn with this so the
+ * answer-patient agent can be fed ONLY its own (answer-phase) turns — never the find-phase chatter
+ * (searches / candidate lists about OTHER patients). See {@link answerHistoryForPatient}.
+ */
+export type AgentName = 'find-patient' | 'answer-patient';
+
+/**
  * One prior conversation turn the client sends so an agent can resolve follow-ups ("what about his
  * allergies?"). Only `user`/`assistant` are accepted; assistant content is a COMPACT summary or
  * answer text (see `QaResult.contextSummary` / the answer path), never a full patient record.
+ *
+ * `agentName` is REQUIRED — every history turn declares the phase that produced it, which is the
+ * routing contract the answer-patient scoping relies on. `patientId` is set only on answer-phase
+ * turns (the patient that turn is about), so the answerer can keep only the active patient's turns.
  */
 export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
+  agentName: AgentName;
+  patientId?: string;
+}
+
+/** True for the two valid agent tags — used to drop untagged/legacy turns during hardening. */
+function isAgentName(value: unknown): value is AgentName {
+  return value === 'find-patient' || value === 'answer-patient';
 }
 
 /**
  * Harden client-supplied history before it reaches any model:
  *   • whitelist roles to user/assistant (drops any injected `system`/`tool` turn),
+ *   • require a valid `agentName` (drops untagged/legacy turns — every real turn is phase-tagged),
  *   • coerce content to a trimmed, length-capped string,
+ *   • carry `agentName` through and preserve a non-empty `patientId` (for answer-phase scoping),
  *   • keep only the most recent MAX_HISTORY_TURNS.
  * Each agent still prepends its OWN trusted system prompt, so a poisoned history can at most nudge
  * the extracted fields / answer — it can never replace the instructions or bypass routing.
@@ -69,14 +101,33 @@ export function sanitizeAndTrim(history: ChatTurn[] | undefined): ChatTurn[] {
       (turn): turn is ChatTurn =>
         !!turn &&
         (turn.role === 'user' || turn.role === 'assistant') &&
+        isAgentName(turn.agentName) &&
         typeof turn.content === 'string' &&
         turn.content.trim().length > 0,
     )
     .map((turn) => ({
       role: turn.role,
       content: turn.content.trim().slice(0, MAX_CONTENT_CHARS),
+      agentName: turn.agentName,
+      ...(typeof turn.patientId === 'string' && turn.patientId.trim().length > 0
+        ? { patientId: turn.patientId }
+        : {}),
     }))
     .slice(-MAX_HISTORY_TURNS);
+}
+
+/**
+ * The answer-phase turns about ONE patient — exactly what the answer-patient agent should see, and
+ * nothing from the find phase or about any other patient. Untagged turns are excluded by
+ * construction (they fail the `agentName` test). Filters on the raw client history; the agent
+ * re-runs {@link sanitizeAndTrim} on the result.
+ */
+export function answerHistoryForPatient(
+  history: ChatTurn[] | undefined,
+  patientId: string,
+): ChatTurn[] {
+  if (!Array.isArray(history)) return [];
+  return history.filter((t) => t?.agentName === 'answer-patient' && t.patientId === patientId);
 }
 
 // ─────────────────────────────── token usage ─────────────────────────────────

@@ -3,9 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../shared/prisma/prisma.service';
 import { EmbeddingsService } from '../../shared/embeddings/embeddings.service';
 import {
-  SAFE_FALLBACK,
+  FIND_PATIENT_FALLBACK,
+  ANSWER_FALLBACK,
   CONTEXT_WINDOW_TOKENS,
   sanitizeAndTrim,
+  answerHistoryForPatient,
   type ChatTurn,
   type TokenUsage,
   type RequestUsage,
@@ -340,6 +342,8 @@ export class QaService {
         trace.severity = bump(trace.severity, 'high');
         trace.fallbackUsed = true;
         trace.resolvedPatientId = null; // nothing actually resolved under this cohort
+        // Keep the VERBATIM FIND_PATIENT_FALLBACK here (not ANSWER_FALLBACK): a foreign/unknown id must be
+        // indistinguishable, so this block never reveals it was a cohort boundary.
         return this.safeFallback(question, traceId);
       }
 
@@ -347,10 +351,13 @@ export class QaService {
       trace.recordsRetrieved = [{ table: 'patient', id: row.id }];
       trace.agent = 'answer-patient';
       const { context } = serializePatientForPrompt(toPatientDetail(row));
+      // Feed the answerer ONLY this patient's answer-phase turns — never the find-phase chatter
+      // (searches / candidate lists about OTHER patients) or a previously-selected patient's Q&A.
+      const answerHistory = answerHistoryForPatient(history, patientId);
       const { result, usage, refused, raw } = await this.answerPatientAgent.answer(
         boundedQuestion,
         context,
-        history,
+        answerHistory,
         { traceId, cohort: group },
       );
       trace.usage = usage;
@@ -369,7 +376,7 @@ export class QaService {
         );
         trace.outcome = trace.injectionDetected ? 'injection_refused' : 'not_answerable';
         trace.fallbackUsed = true;
-        return this.safeFallback(question, traceId, reqUsage);
+        return this.safeFallback(question, traceId, reqUsage, ANSWER_FALLBACK);
       }
       // Normalize citations (strip stray brackets/space the model may add around labels).
       const citations = result.citations.map((c) => c.replace(/[[\]]/g, '').trim()).filter(Boolean);
@@ -403,7 +410,7 @@ export class QaService {
       trace.outcome = 'error';
       trace.severity = bump(trace.severity, 'high');
       trace.fallbackUsed = true;
-      return this.safeFallback(question, traceId, reqUsage);
+      return this.safeFallback(question, traceId, reqUsage, ANSWER_FALLBACK);
     } finally {
       // Single persist for the ANSWER path — guaranteed to run on every return/throw above.
       await this.requestLog.record(trace);
@@ -453,11 +460,18 @@ export class QaService {
 
   /**
    * THE safe-fallback result: no usable extraction, a retrieval that matched nothing, or any error.
-   * Returns the verbatim SAFE_FALLBACK string the cohort-isolation / injection design depends on.
-   * `usage` is passed only when a model call already ran (so its tokens are still reported); the
-   * pre-model fallbacks (empty question, cohort-boundary block) omit it.
+   * Defaults to the verbatim FIND_PATIENT_FALLBACK string the cohort-isolation / injection design depends on;
+   * the answer path overrides `fallback` with the friendlier {@link ANSWER_FALLBACK} for an
+   * ungrounded answer (but NOT for its cohort-boundary block, which keeps the default). `usage` is
+   * passed only when a model call already ran (so its tokens are still reported); the pre-model
+   * fallbacks (empty question, cohort-boundary block) omit it.
    */
-  private safeFallback(question: string, traceId: string, usage?: RequestUsage): QaResult {
-    return { question, traceId, matchCount: 0, fallback: SAFE_FALLBACK, usage };
+  private safeFallback(
+    question: string,
+    traceId: string,
+    usage?: RequestUsage,
+    fallback: string = FIND_PATIENT_FALLBACK,
+  ): QaResult {
+    return { question, traceId, matchCount: 0, fallback, usage };
   }
 }

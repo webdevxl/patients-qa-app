@@ -183,13 +183,22 @@ export interface QaResult {
   usage?: RequestUsage;
 }
 
+/** Which agent/phase produced a turn — mirrors the backend `AgentName` (backend/src/agents/agent-base.ts). */
+export type AgentName = 'find-patient' | 'answer-patient';
+
 /**
  * One prior conversation turn sent so the backend can resolve follow-up references. Assistant
  * content is the compact `contextSummary` (never a full record). The backend sanitizes/trims it.
+ *
+ * `agentName` is REQUIRED — every turn declares its phase so the backend can feed the answer-patient
+ * agent only its own (answer-phase) turns. `patientId` is set only on answer-phase turns (the
+ * patient that turn is about), so scoping keeps just the active patient's turns.
  */
 export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
+  agentName: AgentName;
+  patientId?: string;
 }
 
 /**

@@ -44,9 +44,6 @@ interface ChatScreenProps {
 /** The guided-flow phase. `choosing` hides the composer and shows only the candidate list. */
 type Mode = 'search' | 'choosing' | 'patient';
 
-const SAFE_FALLBACK =
-  'I cannot find a matching patient in your cohort, or I cannot answer this question based on the available records.';
-
 // Starter prompts for the FIND phase — each seeded with real values from the seeded DB. `text` is
 // the clean question sent to the backend; the bracketed note in `label` documents what it resolves
 // to. Cohort isolation applies, so a prompt only resolves when that patient/allergen is in the
@@ -150,13 +147,21 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
    */
   const buildHistory = (): ChatTurn[] =>
     messages
-      .map((m): ChatTurn | null =>
-        m.role === 'user'
-          ? { role: 'user', content: m.text }
-          : m.contextSummary
-            ? { role: 'assistant', content: m.contextSummary }
-            : null,
-      )
+      .map((m): ChatTurn | null => {
+        // Only phase-tagged turns enter history (also narrows agentName to the required field). Every
+        // emitted turn is tagged at its append site, so this never drops a real turn.
+        if (!m.agentName) return null;
+        if (m.role === 'user')
+          return { role: 'user', content: m.text, agentName: m.agentName, patientId: m.patientId };
+        return m.contextSummary
+          ? {
+              role: 'assistant',
+              content: m.contextSummary,
+              agentName: m.agentName,
+              patientId: m.patientId,
+            }
+          : null;
+      })
       .filter((t): t is ChatTurn => t !== null);
 
   /**
@@ -173,6 +178,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
       role: 'assistant',
       text: buildPatientBrief(patient),
       // Goes into history so the answerer has context for "what about his allergies?" follow-ups.
+      // This is the determination moment — the first answer-phase turn for this patient.
+      agentName: 'answer-patient',
+      patientId: patient.id,
       contextSummary: `Now answering about ${fullName(patient)} (id ${patient.id}).`,
     });
     scrollToEnd();
@@ -183,7 +191,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
     // A patient is already pinned — ignore further picks so the chat stays scoped to that one.
     // (The card's Ask button is disabled in this state; this is just defense in depth.)
     if (activePatient) return;
-    append({ id: nextId(), role: 'user', text: fullName(item.patient) });
+    // The candidate echo is a find-phase selection action — the answerer doesn't need it (it has the
+    // records + the "Now answering about X" boundary turn).
+    append({ id: nextId(), role: 'user', text: fullName(item.patient), agentName: 'find-patient' });
     selectPatient(item.patient);
   };
 
@@ -211,7 +221,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
       append({
         id: nextId(),
         role: 'assistant',
-        text: result.fallback ?? SAFE_FALLBACK,
+        // Backend owns the fallback wording — it always sets `fallback` on a 0-match result.
+        text: result.fallback ?? '',
+        agentName: 'find-patient',
         pending: true,
       });
       return;
@@ -225,6 +237,7 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         ? `I found ${items.length} patients — open a record, or tap Ask to choose one.`
         : 'I found a match — view the record, or tap Ask to start asking about them.',
       candidates: items,
+      agentName: 'find-patient',
       contextSummary: many
         ? `Found ${items.length} candidates: ${items.map((i) => fullName(i.patient)).join(', ')}.`
         : `Found 1 candidate: ${fullName(items[0].patient)}.`,
@@ -243,13 +256,18 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         text: result.answer,
         confidence: result.confidence,
         citations: result.citations,
+        agentName: 'answer-patient',
+        patientId: activePatient?.id,
         contextSummary: result.answer,
       });
     } else {
       append({
         id: nextId(),
         role: 'assistant',
-        text: result.fallback ?? SAFE_FALLBACK,
+        // Backend owns the fallback wording — it always sets `fallback` when there's no answer.
+        text: result.fallback ?? '',
+        agentName: 'answer-patient',
+        patientId: activePatient?.id,
         pending: true,
       });
     }
@@ -260,7 +278,13 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
     if (!question || pending || mode === 'choosing') return;
 
     const inPatientMode = mode === 'patient' && !!activePatient;
-    append({ id: nextId(), role: 'user', text: question });
+    append({
+      id: nextId(),
+      role: 'user',
+      text: question,
+      agentName: inPatientMode ? 'answer-patient' : 'find-patient',
+      ...(inPatientMode ? { patientId: activePatient!.id } : {}),
+    });
     setDraft('');
     setPending(true);
     scrollToEnd();

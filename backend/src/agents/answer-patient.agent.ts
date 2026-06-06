@@ -86,7 +86,7 @@ export type AnswerConfidence = 'High' | 'Medium' | 'Low';
  * The fixed answer object. Unlike the extraction schema these keys are all REQUIRED and non-null,
  * so OpenAI strict structured-outputs is satisfied without `.nullable()`:
  *   • answerable — false when the records don't support an answer (or the message is off-topic /
- *     an injection attempt); the service then substitutes the verbatim SAFE_FALLBACK.
+ *     an injection attempt); the service then substitutes the friendlier ANSWER_FALLBACK.
  *   • answer     — concise grounded prose (only meaningful when answerable).
  *   • confidence — the model's own calibration over the supporting evidence.
  *   • citations  — the source-record labels ([C1], [M2], …) the answer relied on.
