@@ -39,6 +39,7 @@ import {
   type ConditionMatch,
 } from '../../agents/tools/find-patients.tool';
 import type { CohortGroup } from '../../shared/security/cohort.types';
+import type { TokenSink } from './qa-stream.types';
 
 /**
  * Response returned to the client. The model only extracts search params — it never composes
@@ -143,11 +144,18 @@ export class QaService {
     return { ...usage, model, contextWindow: CONTEXT_WINDOW_TOKENS };
   }
 
+  /**
+   * @param onToken optional token sink. Present ONLY on the streaming endpoint (`/qa/stream`): the
+   * patient-scoped ANSWER path then streams its grounded prose token-by-token (cumulative answer-so-
+   * far) through it. Absent (the default, e.g. `/qa/query`) → behavior is byte-identical to before,
+   * including a single trace row and the same authoritative {@link QaResult}.
+   */
   async query(
     group: CohortGroup,
     question: string,
     history: ChatTurn[] = [],
     patientId?: string,
+    onToken?: TokenSink,
   ): Promise<QaResult> {
     const traceId = randomUUID();
     const shortId = traceId.slice(0, 8);
@@ -177,6 +185,7 @@ export class QaService {
         shortId,
         elapsed,
         trace,
+        onToken,
       });
     }
 
@@ -302,9 +311,15 @@ export class QaService {
     patientId: string,
     question: string,
     history: ChatTurn[],
-    ctx: { traceId: string; shortId: string; elapsed: () => number; trace: RequestTrace },
+    ctx: {
+      traceId: string;
+      shortId: string;
+      elapsed: () => number;
+      trace: RequestTrace;
+      onToken?: TokenSink;
+    },
   ): Promise<QaResult> {
-    const { traceId, shortId, elapsed, trace } = ctx;
+    const { traceId, shortId, elapsed, trace, onToken } = ctx;
     // The requested id is recorded up front for provenance — even if it's blocked below it's reset.
     trace.resolvedPatientId = patientId;
     this.logger.log(
@@ -354,12 +369,21 @@ export class QaService {
       // Feed the answerer ONLY this patient's answer-phase turns — never the find-phase chatter
       // (searches / candidate lists about OTHER patients) or a previously-selected patient's Q&A.
       const answerHistory = answerHistoryForPatient(history, patientId);
-      const { result, usage, refused, raw } = await this.answerPatientAgent.answer(
-        boundedQuestion,
-        context,
-        answerHistory,
-        { traceId, cohort: group },
-      );
+      // Stream tokens only when a sink was supplied (/qa/stream) — and only HERE, after the cohort
+      // re-verify above has passed, so a blocked/unknown id never streams a single token. Both calls
+      // return the identical PatientAnswerResult; everything downstream is unchanged.
+      const { result, usage, refused, raw } = onToken
+        ? await this.answerPatientAgent.answerStreaming(
+            boundedQuestion,
+            context,
+            answerHistory,
+            { traceId, cohort: group },
+            onToken,
+          )
+        : await this.answerPatientAgent.answer(boundedQuestion, context, answerHistory, {
+            traceId,
+            cohort: group,
+          });
       trace.usage = usage;
       trace.rawModelOutput = raw ?? null;
       trace.confidence = result.confidence ?? null;

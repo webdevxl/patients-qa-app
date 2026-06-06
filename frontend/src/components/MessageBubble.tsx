@@ -39,6 +39,12 @@ export interface ChatMessage {
   patientId?: string;
   /** Marks the safe-fallback / system notices so they can read differently. */
   pending?: boolean;
+  /**
+   * True while this assistant bubble is being streamed token-by-token (the ANSWER path). Renders a
+   * "Thinking…" placeholder until the first token, then a trailing caret while text grows; cleared
+   * when the authoritative result finalizes the bubble.
+   */
+  streaming?: boolean;
 }
 
 const confidenceColor: Record<Confidence, string> = {
@@ -55,6 +61,10 @@ export function MessageBubble({
   accent: string;
 }) {
   const isUser = message.role === 'user';
+  // Before the first streamed token the bubble has no text yet — show a muted placeholder; once text
+  // is flowing, append a caret so it reads as actively typing.
+  const showPlaceholder = !isUser && message.streaming === true && !message.text;
+  const showCaret = !isUser && message.streaming === true && !!message.text;
 
   return (
     <XStack
@@ -80,9 +90,10 @@ export function MessageBubble({
           fontSize={16}
           lineHeight={22}
           letterSpacing={-0.2}
-          color={isUser ? palette.white : palette.label}
+          color={isUser ? palette.white : showPlaceholder ? palette.secondaryLabel : palette.label}
         >
-          {message.text}
+          {showPlaceholder ? 'Thinking…' : message.text}
+          {showCaret ? ' ▌' : ''}
         </Text>
 
         {/* Structured assistant metadata */}

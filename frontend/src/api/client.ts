@@ -3,6 +3,7 @@
 // Base URL resolves from `EXPO_PUBLIC_API_URL` (Expo inlines `EXPO_PUBLIC_*` at build
 // time) and falls back to localhost:3000 — the backend's default port. Keeping this
 // in one place means the eventual hosted deployment only changes an env var.
+import { fetch as expoFetch } from 'expo/fetch';
 import type { CohortGroup } from '../theme/palette';
 
 export const API_BASE_URL =
@@ -279,4 +280,88 @@ export function postQaQuery(
   body: { question: string; history?: ChatTurn[]; patientId?: string },
 ): Promise<QaResult> {
   return postJson<QaResult>('/qa/query', body, token);
+}
+
+// ── Streaming chat (`/qa/stream`) ─────────────────────────────────────────────────────────────
+//
+// Mirrors the backend's QaStreamEvent (backend/src/api/qa/qa-stream.types.ts). The ANSWER path
+// streams the grounded prose as `token` events (each `text` is the answer-SO-FAR, cumulative), then
+// exactly one terminal event: `result` (the authoritative QaResult, identical to `/qa/query`) on
+// success, or `error` on failure. The FIND path emits no tokens — just its `result`.
+
+/** One Server-Sent-Events payload from `/qa/stream` — mirrors the backend `QaStreamEvent`. */
+export type QaStreamEvent =
+  | { type: 'token'; text: string }
+  | { type: 'result'; result: QaResult }
+  | { type: 'error'; message: string };
+
+export interface QaStreamHandlers {
+  /** Called with the cumulative answer-so-far on each token (just assign it — no concat needed). */
+  onToken: (cumulativeAnswer: string) => void;
+  /** Called once with the authoritative result; finalize the bubble (answer/confidence/citations/usage). */
+  onResult: (result: QaResult) => void;
+  /** Called on a stream-level error event; treat like the safe fallback. */
+  onError: (message: string) => void;
+}
+
+/**
+ * Streaming twin of {@link postQaQuery}, used for the patient-scoped ANSWER path so the grounded
+ * answer renders token-by-token. Uses `expo/fetch` — a universal (web + native) WHATWG fetch whose
+ * `body` is a real `ReadableStream` — and parses the SSE `data:` frames. Auth + base URL match the
+ * non-streaming client; a 401 throws `ApiError(401)` so the caller can drop back to the cohort picker.
+ * Resolves when the stream closes (after the terminal event).
+ */
+export async function streamQaQuery(
+  token: string,
+  body: { question: string; history?: ChatTurn[]; patientId?: string },
+  handlers: QaStreamHandlers,
+): Promise<void> {
+  let res;
+  try {
+    res = await expoFetch(`${API_BASE_URL}/qa/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Basic ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new ApiError(`Cannot reach the backend at ${API_BASE_URL}. Is it running?`);
+  }
+  if (res.status === 401) throw new ApiError('Request failed (401)', 401);
+  if (!res.ok) throw new ApiError(`Request failed (${res.status})`, res.status);
+  if (!res.body) {
+    // No stream body available — surface as an error so the caller renders the safe fallback.
+    handlers.onError('no_stream');
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  // SSE frames are separated by a blank line; each frame's `data:` line carries one JSON event.
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const dataLine = frame.split('\n').find((l) => l.startsWith('data:'));
+      if (!dataLine) continue;
+      const json = dataLine.slice(5).trim();
+      if (!json) continue;
+      let evt: QaStreamEvent;
+      try {
+        evt = JSON.parse(json) as QaStreamEvent;
+      } catch {
+        continue; // ignore a malformed/partial frame defensively
+      }
+      if (evt.type === 'token') handlers.onToken(evt.text);
+      else if (evt.type === 'result') handlers.onResult(evt.result);
+      else if (evt.type === 'error') handlers.onError(evt.message);
+    }
+  }
 }

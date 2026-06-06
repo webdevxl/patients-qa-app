@@ -25,10 +25,12 @@ import { PatientDetailModal } from '../components/PatientDetailModal';
 import { TokenUsageBar, ZERO_USAGE, type SessionUsage } from '../components/TokenUsageBar';
 import {
   postQaQuery,
+  streamQaQuery,
   ApiError,
   type PatientDetail,
   type ChatTurn,
   type CandidateItem,
+  type RequestUsage,
 } from '../api/client';
 import { cohortMeta } from '../domain/cohorts';
 import { cohortTheme, palette } from '../theme/palette';
@@ -139,6 +141,28 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
 
   const append = (msg: ChatMessage) => setMessages((prev) => [...prev, msg]);
 
+  /** Merge a partial update into one message by id — used to grow/finalize the streaming bubble. */
+  const patchMessage = (id: string, patch: Partial<ChatMessage>) =>
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+
+  /**
+   * Fold one response's token usage into the cumulative session total — shared by the find path and
+   * the streaming answer path. Responses with no `usage` (e.g. an empty question) leave totals
+   * untouched and keep the prior `lastContextTokens`.
+   */
+  const accumulateUsage = (u: RequestUsage | undefined) => {
+    if (!u) return;
+    setUsage((prev) => ({
+      cumulativeInput: prev.cumulativeInput + (u.inputTokens ?? 0),
+      cumulativeOutput: prev.cumulativeOutput + (u.outputTokens ?? 0),
+      cumulativeTotal: prev.cumulativeTotal + (u.totalTokens ?? 0),
+      turns: prev.turns + 1,
+      lastContextTokens: u.inputTokens ?? prev.lastContextTokens,
+      contextWindow: u.contextWindow,
+      model: u.model,
+    }));
+  };
+
   /**
    * Conversation history sent on every request (whole transcript, no slice). User turns carry their
    * text; assistant turns carry their compact `contextSummary` (a resolution summary, an answer, or
@@ -246,32 +270,28 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
     setMode(many ? 'choosing' : 'search');
   };
 
-  // Route an ASK response: grounded answer (+ confidence/citations) or the safe fallback.
-  const handlePatientAnswer = (result: Awaited<ReturnType<typeof postQaQuery>>) => {
+  // Finalize the live streaming bubble (`liveId`) from the authoritative answer result: a grounded
+  // answer (+ confidence/citations) or the safe fallback. Mirrors the old append-based handler but
+  // PATCHES the bubble that was already streaming, and clears the `streaming` flag. `contextSummary`
+  // is set in both branches so the turn enters `history` (a later "answer the previous question" sees
+  // it). The fallback keeps `pending: true` so it reads as a system notice.
+  const finalizePatientAnswer = (liveId: string, result: Awaited<ReturnType<typeof postQaQuery>>) => {
     if (result.answer) {
-      append({
-        id: nextId(),
-        role: 'assistant',
+      patchMessage(liveId, {
         text: result.answer,
         confidence: result.confidence,
         citations: result.citations,
-        agentName: 'answer-patient',
-        patientId: activePatient?.id,
         contextSummary: result.answer,
+        streaming: false,
       });
     } else {
       const fallback = result.fallback ?? '';
-      append({
-        id: nextId(),
-        role: 'assistant',
+      patchMessage(liveId, {
         // Backend owns the fallback wording — it always sets `fallback` when there's no answer.
         text: fallback,
-        agentName: 'answer-patient',
-        patientId: activePatient?.id,
-        // Keep the unanswered turn in history (as its own context) so a later "answer the previous
-        // question" still sees that this turn happened — without it, buildHistory drops the turn.
         contextSummary: fallback,
         pending: true,
+        streaming: false,
       });
     }
   };
@@ -294,42 +314,58 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
 
     const history = buildHistory();
 
+    // Holds the streaming bubble's id so the catch can finalize it in place (rather than orphan an
+    // empty bubble) if the stream errors after it was appended.
+    let liveId: string | null = null;
     try {
-      const result = await postQaQuery(
-        token,
-        inPatientMode
-          ? { question, history, patientId: activePatient!.id }
-          : { question, history },
-      );
-      // Accumulate token usage before routing — both find and answer turns count (including
-      // post-model fallbacks, which still spent tokens). Responses with no `usage` (e.g. an empty
-      // question) leave the totals untouched; `lastContextTokens` keeps its prior value.
-      if (result.usage) {
-        const u = result.usage;
-        setUsage((prev) => ({
-          cumulativeInput: prev.cumulativeInput + (u.inputTokens ?? 0),
-          cumulativeOutput: prev.cumulativeOutput + (u.outputTokens ?? 0),
-          cumulativeTotal: prev.cumulativeTotal + (u.totalTokens ?? 0),
-          turns: prev.turns + 1,
-          lastContextTokens: u.inputTokens ?? prev.lastContextTokens,
-          contextWindow: u.contextWindow,
-          model: u.model,
-        }));
+      if (inPatientMode) {
+        // ── ANSWER path: stream the grounded answer token-by-token. Append a live bubble up front
+        //    (it's the in-flight indicator), grow it on each token, finalize it on the result. ──
+        const patientId = activePatient!.id;
+        liveId = nextId();
+        append({ id: liveId, role: 'assistant', text: '', agentName: 'answer-patient', patientId, streaming: true });
+        scrollToEnd();
+        await streamQaQuery(
+          token,
+          { question, history, patientId },
+          {
+            onToken: (text) => {
+              patchMessage(liveId!, { text });
+              scrollToEnd();
+            },
+            onResult: (result) => {
+              accumulateUsage(result.usage);
+              finalizePatientAnswer(liveId!, result);
+            },
+            onError: () => {
+              // Stream-level error (rare — the service degrades to a result internally). Read as a
+              // generic notice in the live bubble.
+              patchMessage(liveId!, {
+                text: 'Something went wrong reaching the assistant.',
+                pending: true,
+                streaming: false,
+              });
+            },
+          },
+        );
+        // Safety net: if the stream closed without a terminal event, don't leave the bubble stuck.
+        patchMessage(liveId, { streaming: false });
+      } else {
+        // ── FIND path: unchanged — instant structured results / candidate cards. ──
+        const result = await postQaQuery(token, { question, history });
+        accumulateUsage(result.usage);
+        handleFindResult(result);
       }
-      if (inPatientMode) handlePatientAnswer(result);
-      else handleFindResult(result);
     } catch (e) {
       // 401 ⇒ the session token is missing/expired/invalid — drop back to the picker to re-mint.
       if (e instanceof ApiError && e.status === 401) {
         onSwitchCohort();
         return;
       }
-      append({
-        id: nextId(),
-        role: 'assistant',
-        text: e instanceof ApiError ? e.message : 'Something went wrong reaching the assistant.',
-        pending: true,
-      });
+      const text = e instanceof ApiError ? e.message : 'Something went wrong reaching the assistant.';
+      // Reuse the (empty) live bubble if we already appended one; otherwise add a fresh notice.
+      if (liveId) patchMessage(liveId, { text, pending: true, streaming: false });
+      else append({ id: nextId(), role: 'assistant', text, pending: true });
     } finally {
       setPending(false);
       scrollToEnd();
@@ -444,7 +480,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
               ) : null}
             </React.Fragment>
           ))}
-          {pending ? (
+          {/* Generic in-flight indicator for the FIND path only — the ANSWER path streams a live
+              bubble (mode 'patient'), which is its own indicator, so skip the duplicate here. */}
+          {pending && mode !== 'patient' ? (
             <MessageBubble
               message={{ id: 'thinking', role: 'assistant', text: 'Thinking…' }}
               accent={accent}
