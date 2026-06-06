@@ -9,9 +9,9 @@
  * (seed.ts deleteMany), so if the seed is ever re-run, re-run this load afterwards to repopulate
  * the embeddings. The ON CONFLICT upsert keeps that safe and order-independent.
  *
- * Run: `npm run db:embed-allergen:load`  (needs DATABASE_URL in backend/.env)
+ * Run: `npm run db:embed-allergen:load`  (needs DATABASE_URL in the root /.env;
+ * the npm script wraps it with `node --env-file=../.env …`).
  */
-import 'dotenv/config';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';

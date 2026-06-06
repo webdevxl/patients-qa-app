@@ -9,7 +9,9 @@ CareBrain brand (lavender / periwinkle, Plus Jakarta Sans).
 ## Run
 
 ```bash
-cp .env.example .env.local      # defaults point at the backend on :3000
+# env lives at the repo root (/.env, copied from /.env.example once) — there
+# is no admin/.env.local anymore. next.config.ts loads ../.env at startup so
+# all NEXT_PUBLIC_* vars are inlined at build time.
 npm install
 npm run dev                     # http://localhost:3200
 ```
@@ -35,7 +37,7 @@ Sign in with `admin` / `admin` (configurable — see below).
   [components/columns.tsx](components/columns.tsx) (table) and
   [components/log-detail-sheet.tsx](components/log-detail-sheet.tsx) (drawer).
 
-## Configuration (`.env.local`)
+## Configuration (root `/.env`)
 
 | Variable | Default | Notes |
 |----------|---------|-------|

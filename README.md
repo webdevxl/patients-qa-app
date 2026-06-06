@@ -19,7 +19,8 @@ A vertical-slice prototype of a clinician-facing assistant that answers question
 ```
 patients-qa/
 ├── docker-compose.yml        # PostgreSQL service
-├── .env.example              # DATABASE_URL + LLM key placeholders
+├── .env                      # single source of truth (gitignored — copy from .env.example)
+├── .env.example              # canonical key set for backend + admin + tooling
 ├── backend/                  # Nest.js + Prisma
 │   ├── prisma/
 │   │   ├── schema.prisma     # 5 models mapped to the CSV tables
@@ -28,8 +29,15 @@ patients-qa/
 │   └── src/                  # app module, health endpoint, PrismaService
 ├── frontend/                 # Expo app (placeholder screen)
 ├── admin/                    # Next.js observability log viewer (static SPA, no SSR)
+├── db-dump/                  # portable schema + data + embeddings dump w/ install.sh
 └── task/                     # assignment brief + original CSVs
 ```
+
+> **One env file, top-level.** There are no per-app `.env` / `.env.local`
+> files anymore — backend (via `node --env-file=../.env` baked into npm
+> scripts + a `ConfigModule.envFilePath` fallback) and admin (via
+> `dotenv.config()` at the top of `next.config.ts`) both load the root `/.env`
+> directly. Keep new vars there.
 
 ## Data model
 
@@ -53,26 +61,27 @@ Five tables are imported verbatim from the provided CSVs:
 
 ## Setup & run
 
-### 1. Start PostgreSQL
+### 1. Configure env + start PostgreSQL
 
 ```bash
-cp .env.example .env            # optional; backend has its own .env too
+cp .env.example .env            # required — all apps load /.env at the repo root
 docker compose up -d
 docker compose ps               # wait for the db service to be healthy
 ```
 
 Postgres is exposed on host port **5433** (to avoid clashing with any Postgres
-already on 5432); the connection strings in `.env.example` already match.
+already on 5432); the connection strings in `.env.example` already match. Fill in
+`OPENAI_API_KEY` and `JWT_SECRET` before running the backend — those are
+required.
 
 ### 2. Backend — create schema, seed, run
 
 ```bash
 cd backend
-cp .env.example .env            # if not already present
 npm install
-npx prisma migrate dev --name init   # creates the 5 tables
-npx prisma db seed                   # loads the CSVs
-npm run start:dev                    # http://localhost:3000
+npm run prisma:migrate -- --name init   # creates the 5 tables
+npm run db:seed                         # loads the CSVs
+npm run start:dev                       # http://localhost:3000
 ```
 
 > If port 3000 is already in use, set a different one: `PORT=3001 npm run start:dev`.
@@ -122,15 +131,15 @@ drawer (ShadCN). Styled to match the CareBrain brand.
 
 ```bash
 cd admin
-cp .env.example .env.local      # defaults point at the backend on :3000
 npm install
 npm run dev                     # http://localhost:3200
 ```
 
 Sign in with the primitive gate (`admin` / `admin` by default — configurable via
-`NEXT_PUBLIC_ADMIN_USER` / `NEXT_PUBLIC_ADMIN_PASSWORD` in `.env.local`). It needs the
+`NEXT_PUBLIC_ADMIN_USER` / `NEXT_PUBLIC_ADMIN_PASSWORD` in the root `/.env`). It needs the
 **backend running on :3000** — the admin mints a cohort session token under the hood to
-authorize `/qa/logs`. `npm run build` emits a fully static bundle to `admin/out/`.
+authorize `/qa/logs`. `npm run build` emits a fully static bundle to `admin/out/`;
+`next.config.ts` loads `../.env` at startup so `NEXT_PUBLIC_*` vars are inlined.
 
 > **⚠️ The login is a UI gate only, not real auth** — `NEXT_PUBLIC_*` values are inlined
 > into the browser bundle. A real deployment would gate `/qa/logs` behind a server-side

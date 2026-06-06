@@ -9,9 +9,9 @@
  * Incremental + cheap to re-run: existing embeddings in the artifact are reused; only new or
  * description-changed codes are re-embedded.
  *
- * Run: `npm run db:embed-icd:compute`  (needs OPENAI_API_KEY + DATABASE_URL in backend/.env)
+ * Run: `npm run db:embed-icd:compute`  (needs OPENAI_API_KEY + DATABASE_URL in the
+ * root /.env; the npm script wraps it with `node --env-file=../.env …`).
  */
-import 'dotenv/config';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';

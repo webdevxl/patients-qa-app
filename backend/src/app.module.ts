@@ -23,7 +23,10 @@ function validateEnv(config: Record<string, unknown>): Record<string, unknown> {
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
+    // envFilePath points at the single root .env file (see /.env at the repo root).
+    // Normally vars are already injected by `node --env-file=../.env …` baked into
+    // backend npm scripts; this is a fallback for direct `node dist/main` invocations.
+    ConfigModule.forRoot({ envFilePath: '../.env', isGlobal: true, validate: validateEnv }),
     PrismaModule,
     SecurityModule,
     HealthModule,

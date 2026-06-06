@@ -5,9 +5,9 @@
  * table, writing the pgvector `embedding` column via raw SQL. Idempotent: re-running just
  * re-upserts. This is the only step production needs — embeddings travel as data.
  *
- * Run: `npm run db:embed-icd:load`  (needs DATABASE_URL in backend/.env)
+ * Run: `npm run db:embed-icd:load`  (needs DATABASE_URL in the root /.env; the npm
+ * script wraps it with `node --env-file=../.env …`).
  */
-import 'dotenv/config';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';

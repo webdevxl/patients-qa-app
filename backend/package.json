@@ -5,19 +5,19 @@
   "private": true,
   "scripts": {
     "build": "nest build",
-    "start": "nest start",
-    "start:dev": "nest start --watch",
-    "start:prod": "node dist/main",
-    "studio": "langgraphjs dev",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "db:seed": "prisma db seed",
-    "db:reset": "prisma migrate reset --force",
-    "db:embed-icd:compute": "ts-node prisma/embed-icd-compute.ts",
-    "db:embed-icd:load": "ts-node prisma/embed-icd-load.ts",
-    "db:embed-allergen:compute": "ts-node prisma/embed-allergen-compute.ts",
-    "db:embed-allergen:load": "ts-node prisma/embed-allergen-load.ts",
-    "eval": "ts-node eval/run-eval.ts"
+    "start": "node --env-file=../.env ./node_modules/.bin/nest start",
+    "start:dev": "node --env-file=../.env ./node_modules/.bin/nest start --watch",
+    "start:prod": "node --env-file=../.env dist/main",
+    "studio": "node --env-file=../.env ./node_modules/.bin/langgraphjs dev",
+    "prisma:generate": "node --env-file=../.env ./node_modules/.bin/prisma generate",
+    "prisma:migrate": "node --env-file=../.env ./node_modules/.bin/prisma migrate dev",
+    "db:seed": "node --env-file=../.env ./node_modules/.bin/prisma db seed",
+    "db:reset": "node --env-file=../.env ./node_modules/.bin/prisma migrate reset --force",
+    "db:embed-icd:compute": "node --env-file=../.env ./node_modules/.bin/ts-node prisma/embed-icd-compute.ts",
+    "db:embed-icd:load": "node --env-file=../.env ./node_modules/.bin/ts-node prisma/embed-icd-load.ts",
+    "db:embed-allergen:compute": "node --env-file=../.env ./node_modules/.bin/ts-node prisma/embed-allergen-compute.ts",
+    "db:embed-allergen:load": "node --env-file=../.env ./node_modules/.bin/ts-node prisma/embed-allergen-load.ts",
+    "eval": "node --env-file=../.env ./node_modules/.bin/ts-node eval/run-eval.ts"
   },
   "prisma": {
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"

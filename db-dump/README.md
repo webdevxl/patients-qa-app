@@ -25,12 +25,12 @@ meta-commands, so an older psql client will fail to parse it.
 **Always invoke `install.sh` from inside the `db-dump/` directory** (i.e. with
 `./install.sh …`). The script uses absolute paths derived from its own
 location — *not* `$PWD` — so it can find the three SQL files and the sibling
-`backend/.env` and `docker-compose.yml`. Running it from elsewhere works too,
-but the defaults assume the standard layout:
+`/.env` and `docker-compose.yml`. Running it from elsewhere works too, but the
+defaults assume the standard layout:
 
 ```
 project-root/
-├── backend/.env            ← DATABASE_URL for --mode local
+├── .env                    ← DATABASE_URL for --mode local (single source of truth)
 ├── docker-compose.yml      ← used by default for --mode compose
 └── db-dump/                ← cd here and ./install.sh
     ├── install.sh
@@ -43,7 +43,7 @@ project-root/
 
 The server doesn't need `psql` installed on the host — the script pipes each
 SQL file into the psql binary that already lives inside the DB container.
-Likewise, the `backend/.env` file is **not required** for `--docker` or
+Likewise, the root `/.env` file is **not required** for `--docker` or
 `--compose` modes (the container connects via local socket).
 
 ```bash
@@ -102,7 +102,7 @@ embeddings later with the existing `embed-*-compute.ts` scripts:
 ## Restoring on a dev laptop (host psql)
 
 ```bash
-# Default — reads ../backend/.env for DATABASE_URL.
+# Default — reads ../.env (the single source of truth) for DATABASE_URL.
 ./install.sh
 
 # Or point at a different .env:

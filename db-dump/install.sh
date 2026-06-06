@@ -39,7 +39,9 @@ PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 MODE="local"
 
 # local-mode defaults
-ENV_FILE="${PROJECT_DIR}/backend/.env"
+# Single source of truth: project root /.env (see /.env.example). There are no
+# per-app env files anymore.
+ENV_FILE="${PROJECT_DIR}/.env"
 
 # docker / compose mode defaults — match docker-compose.yml
 CONTAINER="patients-qa-db"
@@ -97,7 +99,7 @@ Examples:
   ./install.sh --compose --compose-file ../docker-compose.yml -y
 
   # Dev laptop with psql installed:
-  ./install.sh                                # uses backend/.env
+  ./install.sh                                # uses /.env at the repo root
   ./install.sh --env /path/to/.env
 
 WARNING: schema.sql begins with DROP TABLE IF EXISTS … so existing data in the

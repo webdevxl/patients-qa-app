@@ -4,5 +4,5 @@
   "graphs": {
     "patient_qa": "./src/agents/studio.graph.ts:graph"
   },
-  "env": ".env"
+  "env": "../.env"
 }
