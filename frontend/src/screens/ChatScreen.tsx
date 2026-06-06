@@ -22,6 +22,7 @@ import { MessageBubble, type ChatMessage } from '../components/MessageBubble';
 import { PatientSummaryCard } from '../components/PatientSummaryCard';
 import { PinnedPatientCard } from '../components/PinnedPatientCard';
 import { PatientDetailModal } from '../components/PatientDetailModal';
+import { TokenUsageBar, ZERO_USAGE, type SessionUsage } from '../components/TokenUsageBar';
 import {
   postQaQuery,
   ApiError,
@@ -119,6 +120,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
   const [mode, setMode] = useState<Mode>('search');
+  // Cumulative token accounting across the session, accumulated from each response's `usage`. The
+  // backend is stateless, so this running total lives here; the TokenUsageBar footer renders it.
+  const [usage, setUsage] = useState<SessionUsage>(ZERO_USAGE);
   const [activePatient, setActivePatient] = useState<PatientDetail | null>(null);
   // The patient whose full record is open in the detail modal (null = closed). Independent of the
   // active (pinned) patient: you can peek any candidate's record without committing to ask about them.
@@ -270,6 +274,21 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
           ? { question, history, patientId: activePatient!.id }
           : { question, history },
       );
+      // Accumulate token usage before routing — both find and answer turns count (including
+      // post-model fallbacks, which still spent tokens). Responses with no `usage` (e.g. an empty
+      // question) leave the totals untouched; `lastContextTokens` keeps its prior value.
+      if (result.usage) {
+        const u = result.usage;
+        setUsage((prev) => ({
+          cumulativeInput: prev.cumulativeInput + (u.inputTokens ?? 0),
+          cumulativeOutput: prev.cumulativeOutput + (u.outputTokens ?? 0),
+          cumulativeTotal: prev.cumulativeTotal + (u.totalTokens ?? 0),
+          turns: prev.turns + 1,
+          lastContextTokens: u.inputTokens ?? prev.lastContextTokens,
+          contextWindow: u.contextWindow,
+          model: u.model,
+        }));
+      }
       if (inPatientMode) handlePatientAnswer(result);
       else handleFindResult(result);
     } catch (e) {
@@ -442,6 +461,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
             </XStack>
           </YStack>
         ) : null}
+
+        {/* Token-usage footer — always visible across phases; cumulative spend + context meter. */}
+        <TokenUsageBar usage={usage} accent={accent} />
 
         {/* Composer — hidden while choosing (the list IS the only interaction); placeholder adapts. */}
         {mode === 'choosing' ? (

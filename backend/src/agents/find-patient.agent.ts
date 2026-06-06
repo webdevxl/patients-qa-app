@@ -13,6 +13,7 @@ import {
   createChatModel,
   sanitizeAndTrim,
   readUsage,
+  DEFAULT_CHAT_MODEL,
   type ChatModelOptions,
   type ChatTurn,
   type TokenUsage,
@@ -29,6 +30,45 @@ import {
  * (identity wins). Constraining the model to this fixed object (vs. free tool-calling / free text)
  * is the core prompt-injection defense: the only thing it can emit is this fixed set of fields.
  */
+
+// ───────────────────────────────── constants ─────────────────────────────────
+
+/** Nest DI token for the find-patient agent, so `QaService` receives a mockable, config-driven instance. */
+export const FIND_PATIENT_AGENT = Symbol('FIND_PATIENT_AGENT');
+
+/** The all-null extraction: nothing identified, nothing to search → routes to the safe fallback. */
+export const EMPTY_EXTRACTION: Extraction = {
+  patientId: null,
+  name: null,
+  conditionQuery: null,
+  allergyQuery: null,
+  observationFilter: null,
+  medicationFilter: null,
+};
+
+// ─────────────────────────────────── prompts ─────────────────────────────────
+
+/**
+ * The extraction SYSTEM prompt — a single trusted prompt targeting `extractionSchema`.
+ */
+const EXTRACTION_SYSTEM_PROMPT = `You extract structured search parameters from a clinician's chat message. You do NOT answer the question — another layer retrieves the records. Read the latest user message (use earlier turns only to resolve references) and fill ONLY the fields that apply:
+
+- patientId: a patient UUID, if the message contains one. Never invent one.
+- name: a person's name when the message is about ONE specific patient (full, first, or last). Resolve pronouns/references ("he/she/they", "that patient", "their meds") to the patient established in earlier turns and put that name here. Identity takes priority: if the message names a specific patient AND mentions a condition/allergy ("Is John Smith allergic to penicillin?"), set name and leave the condition/allergy fields empty.
+- conditionQuery: a disease, diagnosis, or symptom to search ACROSS patients ("which patients have diabetes?"). The clinical concept only. Leave empty for a specific named patient.
+- allergyQuery: a substance from an "allergic to X" search ACROSS patients ("who is allergic to penicillin?"). The substance only. An allergy is NOT a diagnosis — route "allergic to ..." here, never to conditionQuery. Set BOTH conditionQuery and allergyQuery when the message combines them ("diabetics allergic to penicillin").
+- observationFilter: a numeric comparison over a vital sign / measurement ACROSS patients ("weight over 200 lbs", "heart rate above 100", "oxygen saturation below 90"). metric is one of PainLevel, Weight, Height, BloodPressure, BloodSugar, HeartRate, Temperature, RespiratoryRate, OxygenSaturation; operator is gt/gte/lt/lte/eq/between (value2 only for between); value is the raw number in the metric's NATIVE unit (Lbs, Inches, °F, mg/dL, bpm, mmHg, %, Breaths/min, pain 0–10) — never convert units. For BloodPressure set component to systolic or diastolic (default systolic). Set observationFilter ALONGSIDE conditionQuery/allergyQuery when the message combines them ("diabetics with heart rate over 100"). Leave null when no measurement comparison is asked.
+- medicationFilter: which patients TAKE a drug ("who is on Tylenol?", "patients on 325 mg acetaminophen tablets", "injectable insulin"), optionally narrowed by dose/form/route. names = the drug PLUS its brand/generic synonyms for the SAME drug ("Tylenol" → ["Tylenol","acetaminophen"]); NEVER a therapeutic class (for "painkillers"/"antibiotics" leave medicationFilter null). doseText = the dose as a label prints it (number + space + uppercase unit, e.g. "325 MG"; convert "325 milligrams" → "325 MG"), else null. form = EXACTLY one of Tablet, Capsule, Solution, Suspension, Suppository, Cream, Ointment, Gel, Lotion, Spray, Inhaler ("pill" → Tablet), else null. route = EXACTLY one of Oral, Injection, Ophthalmic, Topical, Rectal, Inhalation, Transdermal, Nasal ("by mouth" → Oral, "shot"/"IV" → Injection, "eye" → Ophthalmic), else null. Set medicationFilter ALONGSIDE conditionQuery/allergyQuery/observationFilter when combined ("diabetics on metformin"). Leave null when no specific medication is named.
+
+If the message identifies no specific patient and asks for no searchable condition, allergy, measurement, or medication, leave every field empty.`;
+
+/**
+ * The USER prompt is the raw clinician question — passed through verbatim as the latest
+ * `HumanMessage` (no wrapping), with sanitized prior turns prepended so references resolve. Assembled
+ * in {@link createFindPatientAgent}'s `extract()` below.
+ */
+
+// ──────────────────────────────────── schema ─────────────────────────────────
 
 /**
  * The unified extraction schema. Its fields are exactly the UNION of the find_patients tool's
@@ -101,30 +141,6 @@ export const extractionSchema = z.object({
 
 export type Extraction = z.infer<typeof extractionSchema>;
 
-/** The all-null extraction: nothing identified, nothing to search → routes to the safe fallback. */
-export const EMPTY_EXTRACTION: Extraction = {
-  patientId: null,
-  name: null,
-  conditionQuery: null,
-  allergyQuery: null,
-  observationFilter: null,
-  medicationFilter: null,
-};
-
-/**
- * The extraction system prompt — a single trusted prompt targeting `extractionSchema`.
- */
-const EXTRACTION_SYSTEM_PROMPT = `You extract structured search parameters from a clinician's chat message. You do NOT answer the question — another layer retrieves the records. Read the latest user message (use earlier turns only to resolve references) and fill ONLY the fields that apply:
-
-- patientId: a patient UUID, if the message contains one. Never invent one.
-- name: a person's name when the message is about ONE specific patient (full, first, or last). Resolve pronouns/references ("he/she/they", "that patient", "their meds") to the patient established in earlier turns and put that name here. Identity takes priority: if the message names a specific patient AND mentions a condition/allergy ("Is John Smith allergic to penicillin?"), set name and leave the condition/allergy fields empty.
-- conditionQuery: a disease, diagnosis, or symptom to search ACROSS patients ("which patients have diabetes?"). The clinical concept only. Leave empty for a specific named patient.
-- allergyQuery: a substance from an "allergic to X" search ACROSS patients ("who is allergic to penicillin?"). The substance only. An allergy is NOT a diagnosis — route "allergic to ..." here, never to conditionQuery. Set BOTH conditionQuery and allergyQuery when the message combines them ("diabetics allergic to penicillin").
-- observationFilter: a numeric comparison over a vital sign / measurement ACROSS patients ("weight over 200 lbs", "heart rate above 100", "oxygen saturation below 90"). metric is one of PainLevel, Weight, Height, BloodPressure, BloodSugar, HeartRate, Temperature, RespiratoryRate, OxygenSaturation; operator is gt/gte/lt/lte/eq/between (value2 only for between); value is the raw number in the metric's NATIVE unit (Lbs, Inches, °F, mg/dL, bpm, mmHg, %, Breaths/min, pain 0–10) — never convert units. For BloodPressure set component to systolic or diastolic (default systolic). Set observationFilter ALONGSIDE conditionQuery/allergyQuery when the message combines them ("diabetics with heart rate over 100"). Leave null when no measurement comparison is asked.
-- medicationFilter: which patients TAKE a drug ("who is on Tylenol?", "patients on 325 mg acetaminophen tablets", "injectable insulin"), optionally narrowed by dose/form/route. names = the drug PLUS its brand/generic synonyms for the SAME drug ("Tylenol" → ["Tylenol","acetaminophen"]); NEVER a therapeutic class (for "painkillers"/"antibiotics" leave medicationFilter null). doseText = the dose as a label prints it (number + space + uppercase unit, e.g. "325 MG"; convert "325 milligrams" → "325 MG"), else null. form = EXACTLY one of Tablet, Capsule, Solution, Suspension, Suppository, Cream, Ointment, Gel, Lotion, Spray, Inhaler ("pill" → Tablet), else null. route = EXACTLY one of Oral, Injection, Ophthalmic, Topical, Rectal, Inhalation, Transdermal, Nasal ("by mouth" → Oral, "shot"/"IV" → Injection, "eye" → Ophthalmic), else null. Set medicationFilter ALONGSIDE conditionQuery/allergyQuery/observationFilter when combined ("diabetics on metformin"). Leave null when no specific medication is named.
-
-If the message identifies no specific patient and asks for no searchable condition, allergy, measurement, or medication, leave every field empty.`;
-
 /** What the find-patient agent returns: the parsed search params plus best-effort token usage. */
 export interface ExtractionResult {
   extraction: Extraction;
@@ -134,11 +150,10 @@ export interface ExtractionResult {
 }
 
 export interface FindPatientAgent {
+  /** The resolved chat model name (env override or default) — surfaced so the service can report it. */
+  readonly model: string;
   extract(question: string, history?: ChatTurn[]): Promise<ExtractionResult>;
 }
-
-/** Nest DI token for the find-patient agent, so `QaService` receives a mockable, config-driven instance. */
-export const FIND_PATIENT_AGENT = Symbol('FIND_PATIENT_AGENT');
 
 /**
  * Build the FIND-PATIENT agent: a single `withStructuredOutput` model call that pulls the search
@@ -155,12 +170,14 @@ export const FIND_PATIENT_AGENT = Symbol('FIND_PATIENT_AGENT');
  * the raw AIMessage for token-usage logging.
  */
 export function createFindPatientAgent(options: ChatModelOptions = {}): FindPatientAgent {
+  const model = options.model ?? DEFAULT_CHAT_MODEL;
   const structured = createChatModel(options).withStructuredOutput(extractionSchema, {
     name: 'extract_search_params',
     includeRaw: true,
   });
 
   return {
+    model,
     async extract(question: string, history: ChatTurn[] = []): Promise<ExtractionResult> {
       const messages: BaseMessage[] = [
         new SystemMessage(EXTRACTION_SYSTEM_PROMPT),

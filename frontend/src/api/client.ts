@@ -156,6 +156,20 @@ export interface ConditionMatch {
  *   • citations      — source-record labels ([C1], [M2], …) the answer relied on.
  * A patient-scoped request that can't be answered still comes back as `fallback`.
  */
+/**
+ * Best-effort token usage for the single LLM call a request made — mirrors the backend's
+ * `RequestUsage` (backend/src/agents/agent-base.ts). Absent when no model call ran (e.g. an empty
+ * question). `contextWindow` is the backend's own tunable budget the UI charts the conversation
+ * against, so the client never hardcodes it.
+ */
+export interface RequestUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  model: string;
+  contextWindow: number;
+}
+
 export interface QaResult {
   question: string;
   matchCount: number;
@@ -166,6 +180,7 @@ export interface QaResult {
   answer?: string;
   confidence?: 'High' | 'Medium' | 'Low';
   citations?: string[];
+  usage?: RequestUsage;
 }
 
 /**

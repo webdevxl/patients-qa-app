@@ -2,7 +2,13 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmbeddingsService } from '../embeddings/embeddings.service';
-import { SAFE_FALLBACK, type ChatTurn } from '../agents/agent-base';
+import {
+  SAFE_FALLBACK,
+  CONTEXT_WINDOW_TOKENS,
+  type ChatTurn,
+  type TokenUsage,
+  type RequestUsage,
+} from '../agents/agent-base';
 import {
   FIND_PATIENT_AGENT,
   type FindPatientAgent,
@@ -57,6 +63,13 @@ export interface QaResult {
   answer?: string;
   confidence?: AnswerConfidence;
   citations?: string[];
+  /**
+   * Best-effort token usage for the single LLM call this request made (the FIND path's extraction
+   * or the ANSWER path's generation), surfaced for the client's chat-window usage meter. Absent only
+   * when no model call ran (e.g. an empty question) — present even on a post-extraction fallback,
+   * since those tokens were still spent.
+   */
+  usage?: RequestUsage;
 }
 
 /** Cap the question length to bound token spend / injection surface (history is capped separately). */
@@ -108,6 +121,17 @@ export class QaService {
     @Inject(ANSWER_PATIENT_AGENT) private readonly answerPatientAgent: AnswerPatientAgent,
   ) {}
 
+  /**
+   * Compose the client-facing {@link RequestUsage} from an agent's best-effort {@link TokenUsage}
+   * plus the resolved model name. Returns `undefined` when no usage was captured (no model call /
+   * provider omitted it), so a result simply carries no `usage` rather than fabricated zeros. The
+   * context-window budget is our own tunable constant, shared by every request.
+   */
+  private toRequestUsage(usage: TokenUsage | undefined, model: string): RequestUsage | undefined {
+    if (!usage) return undefined;
+    return { ...usage, model, contextWindow: CONTEXT_WINDOW_TOKENS };
+  }
+
   async query(
     group: CohortGroup,
     question: string,
@@ -143,6 +167,10 @@ export class QaService {
     // ── 1. Extract (the only LLM call). A malformed/failed extraction degrades to the safe
     //       fallback rather than throwing a 500. ──
     let extraction: Extraction;
+    // Captured here so every downstream result — matches, identity, OR a post-extraction fallback —
+    // reports the tokens this call already spent. The empty-question fallback above ran before this,
+    // so it correctly carries no usage.
+    let reqUsage: RequestUsage | undefined;
     try {
       const extractionResult = await this.findPatientAgent.extract(boundedQuestion, history);
       extraction = extractionResult.extraction;
@@ -150,6 +178,7 @@ export class QaService {
         this.logger.warn(`🛡️ [${shortId}] extractor refused / returned null → safe fallback`);
       }
       const usage = extractionResult.usage;
+      reqUsage = this.toRequestUsage(usage, this.findPatientAgent.model);
       this.logger.log(
         `🔎 [${shortId}] extracted ${JSON.stringify(extraction)} in ${elapsed()}ms` +
           (usage
@@ -175,27 +204,28 @@ export class QaService {
         this.logger.log(
           `🚫 [${shortId}] find_patients → 0 matches (${elapsed()}ms total) → fallback`,
         );
-        return this.safeFallback(question, traceId);
+        return this.safeFallback(question, traceId, reqUsage);
       }
 
       if (retrieval.patients) {
         this.logger.log(
           `👤 [${shortId}] find_patients (identity) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
         );
-        return this.buildIdentityResult(question, traceId, retrieval);
+        return this.buildIdentityResult(question, traceId, retrieval, reqUsage);
       }
 
       const description = describeSearch(retrieval.query);
       this.logger.log(
         `🩺 [${shortId}] find_patients (${description}) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
       );
-      return this.buildAttributeResult(question, traceId, retrieval, description);
+      return this.buildAttributeResult(question, traceId, retrieval, description, reqUsage);
     } catch (err) {
       this.logger.error(
         `💥 [${shortId}] retrieval failed`,
         err instanceof Error ? err.stack : String(err),
       );
-      return this.safeFallback(question, traceId);
+      // Retrieval failed AFTER extraction spent tokens — still report them.
+      return this.safeFallback(question, traceId, reqUsage);
     }
   }
 
@@ -223,6 +253,10 @@ export class QaService {
     if (!question) return this.safeFallback(question, traceId);
     const boundedQuestion = question.slice(0, MAX_QUESTION_CHARS);
 
+    // Assigned only once the model call returns, so it threads into the success result, the
+    // not-answerable fallback, and the post-call catch — but stays undefined for the pre-call
+    // fallbacks (empty question above, cohort-boundary block below), which spent no tokens.
+    let reqUsage: RequestUsage | undefined;
     try {
       // ── Cohort re-verification (the critical isolation defense): re-read THIS patient under the
       //    caller's group before anything else. ──
@@ -246,6 +280,7 @@ export class QaService {
         context,
         history,
       );
+      reqUsage = this.toRequestUsage(usage, this.answerPatientAgent.model);
       if (refused) {
         this.logger.warn(`🛡️ [${shortId}] answerer refused / unparseable → safe fallback`);
       }
@@ -253,7 +288,7 @@ export class QaService {
         this.logger.log(
           `🚫 [${shortId}] not answerable from patient ${patientId}'s records (${elapsed()}ms) → fallback`,
         );
-        return this.safeFallback(question, traceId);
+        return this.safeFallback(question, traceId, reqUsage);
       }
       // Normalize citations (strip stray brackets/space the model may add around labels).
       const citations = result.citations.map((c) => c.replace(/[[\]]/g, '').trim()).filter(Boolean);
@@ -272,13 +307,16 @@ export class QaService {
         answer: result.answer,
         confidence: result.confidence,
         citations,
+        usage: reqUsage,
       };
     } catch (err) {
       this.logger.error(
         `💥 [${shortId}] patient answer path failed (re-fetch or generation)`,
         err instanceof Error ? err.stack : String(err),
       );
-      return this.safeFallback(question, traceId);
+      // `reqUsage` is set only if the generation call returned before throwing — so this reports
+      // tokens on a post-generation failure but not on a re-fetch failure (which spent none).
+      return this.safeFallback(question, traceId, reqUsage);
     }
   }
 
@@ -287,6 +325,7 @@ export class QaService {
     question: string,
     traceId: string,
     retrieval: FindPatientsResult,
+    usage?: RequestUsage,
   ): QaResult {
     const patients = retrieval.patients ?? [];
     return {
@@ -297,6 +336,7 @@ export class QaService {
       contextSummary:
         `Resolved ${countNoun(retrieval.matchCount, 'patient', 'patients')}: ` +
         joinNames(patients.map(fullName)),
+      usage,
     };
   }
 
@@ -306,6 +346,7 @@ export class QaService {
     traceId: string,
     retrieval: FindPatientsResult,
     description: string,
+    usage?: RequestUsage,
   ): QaResult {
     const matches = retrieval.matches ?? [];
     return {
@@ -316,14 +357,17 @@ export class QaService {
       contextSummary:
         `Search (${description}) → ${countNoun(retrieval.matchCount, 'match', 'matches')}: ` +
         joinNames(matches.map((match) => fullName(match.patient))),
+      usage,
     };
   }
 
   /**
    * THE safe-fallback result: no usable extraction, a retrieval that matched nothing, or any error.
    * Returns the verbatim SAFE_FALLBACK string the cohort-isolation / injection design depends on.
+   * `usage` is passed only when a model call already ran (so its tokens are still reported); the
+   * pre-model fallbacks (empty question, cohort-boundary block) omit it.
    */
-  private safeFallback(question: string, traceId: string): QaResult {
-    return { question, traceId, matchCount: 0, fallback: SAFE_FALLBACK };
+  private safeFallback(question: string, traceId: string, usage?: RequestUsage): QaResult {
+    return { question, traceId, matchCount: 0, fallback: SAFE_FALLBACK, usage };
   }
 }

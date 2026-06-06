@@ -8,6 +8,8 @@ import { AIMessage, type BaseMessage } from '@langchain/core/messages';
  * here. Nest-free (Studio graph and scripts reuse it too).
  */
 
+// ───────────────────────────────── constants ─────────────────────────────────
+
 /**
  * Safe fallback string (used verbatim per the spec) for when no patient can be resolved or a
  * question can't be answered from the records. `QaService` returns this whenever extraction yields
@@ -15,6 +17,31 @@ import { AIMessage, type BaseMessage } from '@langchain/core/messages';
  */
 export const SAFE_FALLBACK =
   'I cannot find a matching patient in your cohort, or I cannot answer this question based on the available records.';
+
+/** Keep at most this many prior turns — generous so the agent has the full conversation context,
+ *  while still bounding token spend + injection surface on a long chat. */
+const MAX_HISTORY_TURNS = 20;
+/** Cap any single turn's content to bound tokens + injection surface. */
+const MAX_CONTENT_CHARS = 2000;
+
+/**
+ * Our own context-window budget (tokens) for the chat-window usage meter — a single tunable constant,
+ * deliberately NOT the model's true context limit. Change it here to move the meter's % baseline.
+ */
+export const CONTEXT_WINDOW_TOKENS = 100_000;
+
+/** Default chat model + sampling; overridable via ConfigService at the DI layer. */
+export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini';
+export const DEFAULT_CHAT_TEMPERATURE = 0;
+
+// Client-side resilience so a slow/stalled OpenAI call fails FAST into the safe-fallback path
+// instead of inheriting the SDK's ~10-minute default and fanning out unbounded under load. Worst-
+// case wall time ≈ timeout × (1 + maxRetries), so keep retries low.
+const CHAT_TIMEOUT_MS = 15_000;
+const CHAT_MAX_RETRIES = 2;
+const CHAT_MAX_CONCURRENCY = 8;
+
+// ──────────────────────────── conversation history ───────────────────────────
 
 /**
  * One prior conversation turn the client sends so an agent can resolve follow-ups ("what about his
@@ -25,12 +52,6 @@ export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
 }
-
-/** Keep at most this many prior turns — generous so the agent has the full conversation context,
- *  while still bounding token spend + injection surface on a long chat. */
-const MAX_HISTORY_TURNS = 20;
-/** Cap any single turn's content to bound tokens + injection surface. */
-const MAX_CONTENT_CHARS = 2000;
 
 /**
  * Harden client-supplied history before it reaches any model:
@@ -57,6 +78,8 @@ export function sanitizeAndTrim(history: ChatTurn[] | undefined): ChatTurn[] {
     .slice(-MAX_HISTORY_TURNS);
 }
 
+// ─────────────────────────────── token usage ─────────────────────────────────
+
 /** Token usage for one model call (best-effort; surfaced for observability). */
 export interface TokenUsage {
   inputTokens?: number;
@@ -75,15 +98,17 @@ export function readUsage(raw: BaseMessage): TokenUsage | undefined {
   };
 }
 
-/** Default chat model + sampling; overridable via ConfigService at the DI layer. */
-export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini';
-export const DEFAULT_CHAT_TEMPERATURE = 0;
-// Client-side resilience so a slow/stalled OpenAI call fails FAST into the safe-fallback path
-// instead of inheriting the SDK's ~10-minute default and fanning out unbounded under load. Worst-
-// case wall time ≈ timeout × (1 + maxRetries), so keep retries low.
-const CHAT_TIMEOUT_MS = 15_000;
-const CHAT_MAX_RETRIES = 2;
-const CHAT_MAX_CONCURRENCY = 8;
+/**
+ * Per-request token usage surfaced to the client (extends {@link TokenUsage} with the model name and
+ * the context-window budget the UI charts the conversation against). The service composes this from
+ * the agent's best-effort {@link TokenUsage} plus the resolved model.
+ */
+export interface RequestUsage extends TokenUsage {
+  model: string;
+  contextWindow: number;
+}
+
+// ──────────────────────────────── chat model ─────────────────────────────────
 
 /** Tuning knobs for the chat model (model + temperature); resilience is fixed in {@link createChatModel}. */
 export interface ChatModelOptions {
