@@ -145,6 +145,13 @@ export class QaService {
   }
 
   /**
+   * @param group
+   * @param question
+   * @param history
+   * @param patientId
+   * @param sessionId optional conversation id (client-minted, stable per chat). Forwarded to both the
+   * find and answer agent calls so their LangSmith runs carry the same `session_id` and group into one
+   * thread. Purely observability — it never changes routing or output.
    * @param onToken optional token sink. Present ONLY on the streaming endpoint (`/qa/stream`): the
    * patient-scoped ANSWER path then streams its grounded prose token-by-token (cumulative answer-so-
    * far) through it. Absent (the default, e.g. `/qa/query`) → behavior is byte-identical to before,
@@ -155,6 +162,7 @@ export class QaService {
     question: string,
     history: ChatTurn[] = [],
     patientId?: string,
+    sessionId?: string,
     onToken?: TokenSink,
   ): Promise<QaResult> {
     const traceId = randomUUID();
@@ -185,6 +193,7 @@ export class QaService {
         shortId,
         elapsed,
         trace,
+        sessionId,
         onToken,
       });
     }
@@ -215,6 +224,7 @@ export class QaService {
         const extractionResult = await this.findPatientAgent.extract(boundedQuestion, history, {
           traceId,
           cohort: group,
+          sessionId,
         });
         extraction = extractionResult.extraction;
         trace.rawModelOutput = extractionResult.raw ?? null;
@@ -316,10 +326,11 @@ export class QaService {
       shortId: string;
       elapsed: () => number;
       trace: RequestTrace;
+      sessionId?: string;
       onToken?: TokenSink;
     },
   ): Promise<QaResult> {
-    const { traceId, shortId, elapsed, trace, onToken } = ctx;
+    const { traceId, shortId, elapsed, trace, sessionId, onToken } = ctx;
     // The requested id is recorded up front for provenance — even if it's blocked below it's reset.
     trace.resolvedPatientId = patientId;
     this.logger.log(
@@ -377,12 +388,13 @@ export class QaService {
             boundedQuestion,
             context,
             answerHistory,
-            { traceId, cohort: group },
+            { traceId, cohort: group, sessionId },
             onToken,
           )
         : await this.answerPatientAgent.answer(boundedQuestion, context, answerHistory, {
             traceId,
             cohort: group,
+            sessionId,
           });
       trace.usage = usage;
       trace.rawModelOutput = raw ?? null;

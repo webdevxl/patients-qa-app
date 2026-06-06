@@ -66,6 +66,16 @@ const SUGGESTIONS: { label: string; text: string }[] = [
 let messageSeq = 0;
 const nextId = () => `m${messageSeq++}`;
 
+/**
+ * One stable conversation id per ChatScreen mount, sent on every request so the backend stamps it as
+ * the LangSmith `session_id` — grouping the whole chat's per-turn traces (find + answer) into one
+ * thread instead of scattered rows. Switching cohort remounts this screen, so a new conversation gets
+ * a fresh id. Not security-sensitive (pure observability correlation), so a lightweight unique-enough
+ * id is fine — it never needs to be unguessable.
+ */
+const makeSessionId = (): string =>
+  `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+
 function fullName(p: PatientDetail): string {
   return `${p.nameFirst ?? ''} ${p.nameLast ?? ''}`.trim() || 'this patient';
 }
@@ -115,6 +125,8 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
   const meta = cohortMeta(group);
   const accent = cohortTheme[group].accent;
   const scrollRef = useRef<ScrollView>(null);
+  // Stable for this conversation; echoed on every request → groups the chat into one LangSmith thread.
+  const sessionId = useRef(makeSessionId()).current;
 
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
@@ -327,7 +339,7 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         scrollToEnd();
         await streamQaQuery(
           token,
-          { question, history, patientId },
+          { question, history, patientId, sessionId },
           {
             onToken: (text) => {
               patchMessage(liveId!, { text });
@@ -352,7 +364,7 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         patchMessage(liveId, { streaming: false });
       } else {
         // ── FIND path: unchanged — instant structured results / candidate cards. ──
-        const result = await postQaQuery(token, { question, history });
+        const result = await postQaQuery(token, { question, history, sessionId });
         accumulateUsage(result.usage);
         handleFindResult(result);
       }

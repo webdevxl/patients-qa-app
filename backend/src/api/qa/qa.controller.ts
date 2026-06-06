@@ -28,9 +28,16 @@ export class QaController {
   @Post('query')
   async query(
     @ActiveCohort() group: CohortGroup,
-    @Body() body: { question: string; history?: ChatTurn[]; patientId?: string },
+    @Body()
+    body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
   ): Promise<QaResult> {
-    return this.qaService.query(group, body.question, body.history, body.patientId);
+    return this.qaService.query(
+      group,
+      body.question,
+      body.history,
+      body.patientId,
+      body.sessionId,
+    );
   }
 
   /**
@@ -48,7 +55,8 @@ export class QaController {
   @Post('stream')
   async stream(
     @ActiveCohort() group: CohortGroup,
-    @Body() body: { question: string; history?: ChatTurn[]; patientId?: string },
+    @Body()
+    body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
     @Res() res: Response,
   ): Promise<void> {
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -67,6 +75,7 @@ export class QaController {
         body.question,
         body.history,
         body.patientId,
+        body.sessionId,
         (text) => send({ type: 'token', text }),
       );
       send({ type: 'result', result });

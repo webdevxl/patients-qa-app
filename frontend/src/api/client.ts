@@ -277,7 +277,7 @@ export function postSelectGroup(
  */
 export function postQaQuery(
   token: string,
-  body: { question: string; history?: ChatTurn[]; patientId?: string },
+  body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
 ): Promise<QaResult> {
   return postJson<QaResult>('/qa/query', body, token);
 }
@@ -313,7 +313,7 @@ export interface QaStreamHandlers {
  */
 export async function streamQaQuery(
   token: string,
-  body: { question: string; history?: ChatTurn[]; patientId?: string },
+  body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
   handlers: QaStreamHandlers,
 ): Promise<void> {
   let res;

@@ -1,9 +1,5 @@
-import {
-  SystemMessage,
-  HumanMessage,
-  AIMessage,
-  type BaseMessage,
-} from '@langchain/core/messages';
+import { HumanMessage, AIMessage, type BaseMessage } from '@langchain/core/messages';
+import { createAgent, providerStrategy, StructuredOutputParsingError } from 'langchain';
 import { z } from 'zod';
 import {
   createChatModel,
@@ -77,9 +73,11 @@ const recordsUserPrompt = (recordsContext: string): string =>
   `<<<RECORD\n${recordsContext}\nRECORD>>>`;
 
 /**
- * Assemble the exact message list both {@link AnswerPatientAgent.answer} and its streaming twin send:
- * trusted system prompt, the records as delimited DATA, the (re-sanitized) prior answer-phase turns,
- * then the clinician's question last. One place so the streaming and non-streaming paths can never
+ * Assemble the INPUT message list both {@link AnswerPatientAgent.answer} and its streaming twin send
+ * to the agent: the records as delimited DATA, the (re-sanitized) prior answer-phase turns, then the
+ * clinician's question last. The trusted SYSTEM prompt is NOT included here — the agent owns it via
+ * `systemPrompt` and prepends it, so the effective order the model sees is unchanged:
+ * [system, records, …history, question]. One place so the streaming and non-streaming paths can never
  * drift in what the model actually sees.
  */
 function buildAnswerMessages(
@@ -88,7 +86,6 @@ function buildAnswerMessages(
   history: ChatTurn[],
 ): BaseMessage[] {
   return [
-    new SystemMessage(ANSWER_SYSTEM_PROMPT),
     new HumanMessage(recordsUserPrompt(recordsContext)),
     ...sanitizeAndTrim(history).map((turn) =>
       turn.role === 'user' ? new HumanMessage(turn.content) : new AIMessage(turn.content),
@@ -151,10 +148,17 @@ export type PatientAnswer = z.infer<typeof answerSchema>;
 /** What the answer-patient agent returns: the parsed answer object, best-effort token usage, and a refusal flag. */
 export interface PatientAnswerResult {
   result: PatientAnswer;
+  /** Best-effort token usage. Absent on a structured-output PARSE-FAILURE refusal: providerStrategy
+   *  throws {@link StructuredOutputParsingError}, which doesn't carry the generated message, so usage
+   *  is unreachable there. The common "can't answer" case is `answerable:false` — which parses fine and
+   *  DOES report usage/raw. */
   usage?: TokenUsage;
-  /** True when the model refused / returned unparseable output and we substituted {@link UNANSWERABLE}. */
+  /** True when the model refused / returned unparseable STRUCTURED output and we substituted
+   *  {@link UNANSWERABLE}. NOT set for a hard infra error (timeout / network / 5xx) — that propagates
+   *  so the service classifies it as `error`/high, never as an injection signal. */
   refused?: boolean;
-  /** Best-effort raw model output (structured tool-call args / text) — recorded in the audit log. */
+  /** Best-effort raw model output (the json_schema content) — recorded in the audit log. Absent on a
+   *  parse-failure refusal (see `usage`). */
   raw?: string;
 }
 
@@ -169,12 +173,12 @@ export interface AnswerPatientAgent {
   ): Promise<PatientAnswerResult>;
   /**
    * Streaming twin of {@link answer}: same prompt, same schema, same authoritative parse — but the
-   * model is driven via `streamEvents`, so the grounded answer prose is surfaced token-by-token
-   * through `onToken` (cumulative answer-so-far) as it generates. `onToken` is DISPLAY-ONLY; the
-   * returned {@link PatientAnswerResult} is always the validated structured object (+ usage), never
-   * the streamed text — so a refusal/ungrounded turn streams nothing and the recorded answer is
-   * unaffected by mid-stream rendering. (`history`/`trace` are required here — a required `onToken`
-   * can't follow optional params; the caller always has both.)
+   * agent is driven via `agent.stream` (streamMode `['messages','values']`), so the grounded answer
+   * prose is surfaced token-by-token through `onToken` (cumulative answer-so-far) as it generates.
+   * `onToken` is DISPLAY-ONLY; the returned {@link PatientAnswerResult} is always the validated
+   * structured object (+ usage), never the streamed text — so a refusal/ungrounded turn streams
+   * nothing and the recorded answer is unaffected by mid-stream rendering. (`history`/`trace` are
+   * required here — a required `onToken` can't follow optional params; the caller always has both.)
    */
   answerStreaming(
     question: string,
@@ -378,16 +382,31 @@ export function serializePatientForPrompt(p: PatientDetail): {
 
 // ─────────────────────────── streaming helpers (display-only) ────────────────────────────
 
-/** Flatten an `on_chat_model_stream` chunk's `content` (string or content-part array) to text. */
+/**
+ * Flatten a streamed message chunk to text — handles the agent's `messages`-mode `AIMessageChunk`
+ * whether the provider carries text in `content` (string or content-part array) or in 1.x
+ * `contentBlocks`. Returns '' when there's no text yet (e.g. a non-text/usage-only chunk).
+ */
 function chunkContentToString(chunk: unknown): string {
   if (!chunk || typeof chunk !== 'object') return '';
   const content = (chunk as { content?: unknown }).content;
-  if (typeof content === 'string') return content;
+  if (typeof content === 'string' && content.length > 0) return content;
   if (Array.isArray(content)) {
-    return content
+    const joined = content
       .map((part) => {
         if (typeof part === 'string') return part;
         const text = (part as { text?: unknown })?.text;
+        return typeof text === 'string' ? text : '';
+      })
+      .join('');
+    if (joined.length > 0) return joined;
+  }
+  // 1.x sometimes carries the text in `contentBlocks` rather than `content`.
+  const blocks = (chunk as { contentBlocks?: unknown }).contentBlocks;
+  if (Array.isArray(blocks)) {
+    return blocks
+      .map((b) => {
+        const text = (b as { text?: unknown })?.text;
         return typeof text === 'string' ? text : '';
       })
       .join('');
@@ -396,8 +415,9 @@ function chunkContentToString(chunk: unknown): string {
 }
 
 /**
- * Tolerant, DISPLAY-ONLY read of the streaming structured JSON. As `withStructuredOutput` streams its
- * json_schema payload, `buf` grows like `{"answerable":true,"answer":"He has a penicil…` — we surface
+ * Tolerant, DISPLAY-ONLY read of the streaming structured JSON. As the agent streams the providerStrategy
+ * json_schema payload (messages-mode `AIMessageChunk` deltas), `buf` grows like
+ * `{"answerable":true,"answer":"He has a penicil…` — we surface
  * `answerable` (the gate) and the answer-so-far WITHOUT waiting for valid JSON, decoding the common
  * string escapes. Never throws; never feeds the authoritative result (that's always the validated
  * parse). Because the schema orders `answerable` before `answer`, the gate is known before any prose.
@@ -456,17 +476,52 @@ function parsePartialAnswer(buf: string): { answerable?: boolean; answer?: strin
   return { answerable, answer };
 }
 
+/** Last message of an agent state's message list (the model's AI reply) — for usage/raw. */
+function lastMessage(messages: BaseMessage[] | undefined): BaseMessage | undefined {
+  return Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : undefined;
+}
+
 /**
- * Build the ANSWER-PATIENT agent. One `withStructuredOutput` call constrained to {@link
- * answerSchema}. On refusal / unparseable output `parsed` is null — we return {@link UNANSWERABLE}
- * (so the caller emits the safe fallback) and flag `refused`. {@link AnswerPatientAgent.answerStreaming}
- * drives the SAME runnable via `streamEvents` for token-by-token prose, with an `invoke` fallback.
+ * True for a structured-output PARSE FAILURE — the model's terminal output didn't satisfy the schema
+ * (a genuine refusal / unparseable answer). Under providerStrategy this surfaces as a THROWN
+ * {@link StructuredOutputParsingError} (unlike the old `withStructuredOutput`, which returned
+ * `parsed:null`). We treat ONLY this as `refused`; every OTHER throw is a hard infra error (timeout /
+ * network / 5xx) that must propagate, so the service logs it as `error`/high — never as an injection
+ * signal (and never inflating the eval's injection metrics). Checks the error and one level of `cause`
+ * in case LangGraph wraps it.
+ */
+function isStructuredOutputParseFailure(err: unknown): boolean {
+  const hit = (e: unknown): boolean =>
+    e instanceof StructuredOutputParsingError ||
+    (typeof e === 'object' &&
+      e !== null &&
+      (e as { name?: unknown }).name === 'StructuredOutputParsingError');
+  return hit(err) || hit((err as { cause?: unknown } | null | undefined)?.cause);
+}
+
+/**
+ * Build the ANSWER-PATIENT agent: a zero-tool {@link createAgent} whose `responseFormat` is the
+ * provider-native ({@link providerStrategy}) {@link answerSchema}. The model is still boxed into
+ * exactly {answerable, answer, confidence, citations} in ONE call — and because providerStrategy uses
+ * OpenAI's native json_schema, that JSON streams as message content (the streaming path reads it
+ * live). The trusted system prompt is owned by the agent (`systemPrompt`); records/history/question
+ * are the input messages. There is NO tool and NO agent loop here — this is the 1.x structured-output
+ * runtime, and the exact seam the future tool-calling A/B variant slots into.
+ *
+ * On refusal / unparseable output `structuredResponse` is absent — we return {@link UNANSWERABLE} (so
+ * the caller emits the safe fallback) and flag `refused`. {@link AnswerPatientAgent.answerStreaming}
+ * drives the SAME agent via `stream` for token-by-token prose, with an `invoke` fallback so
+ * correctness never depends on the token stream.
  */
 export function createAnswerPatientAgent(options: ChatModelOptions = {}): AnswerPatientAgent {
   const model = options.model ?? DEFAULT_CHAT_MODEL;
-  const structured = createChatModel(options).withStructuredOutput(answerSchema, {
-    name: 'answer_about_patient',
-    includeRaw: true,
+  const agent = createAgent({
+    model: createChatModel(options),
+    tools: [],
+    systemPrompt: ANSWER_SYSTEM_PROMPT,
+    // providerStrategy = OpenAI-native json_schema (strict): no extra tool/model call, and the JSON
+    // streams as message content. answerSchema is all-required, so strict mode needs no `.nullable()`.
+    responseFormat: providerStrategy(answerSchema),
   });
 
   return {
@@ -478,16 +533,30 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
       trace?: TraceContext,
     ): Promise<PatientAnswerResult> {
       const messages = buildAnswerMessages(question, recordsContext, history);
-      // The run config names + tags this call (agent:answer-patient, cohort, variant) for LangSmith.
-      const { raw, parsed } = await structured.invoke(
-        messages,
-        buildRunConfig('answer-patient', trace),
-      );
-      const rawText = rawContentToString(raw);
-      if (parsed == null) {
-        return { result: UNANSWERABLE, usage: readUsage(raw), refused: true, raw: rawText };
+      // The run config names + tags this call (agent:answer-patient, cohort, session_id) for LangSmith.
+      const config = buildRunConfig('answer-patient', trace);
+      try {
+        const res = await agent.invoke({ messages }, config);
+        const last = lastMessage(res.messages);
+        // structuredResponse is statically non-optional, but a refusal throws before here; `?? null`
+        // is purely defensive.
+        const parsed = (res.structuredResponse as PatientAnswer | undefined) ?? null;
+        const usage = last ? readUsage(last) : undefined;
+        const rawText = last ? rawContentToString(last) : undefined;
+        if (parsed == null) {
+          return { result: UNANSWERABLE, usage, refused: true, raw: rawText };
+        }
+        return { result: parsed, usage, raw: rawText };
+      } catch (err) {
+        // A structured-output parse failure is the answerer's injection ceiling tripping → refused
+        // (the service flags injectionDetected). Any OTHER throw is a hard infra error (timeout / 5xx)
+        // — RE-THROW so the service's outer catch logs it as error/high (matching the find path),
+        // never as an injection signal.
+        if (isStructuredOutputParseFailure(err)) {
+          return { result: UNANSWERABLE, refused: true };
+        }
+        throw err;
       }
-      return { result: parsed, usage: readUsage(raw), raw: rawText };
     },
 
     async answerStreaming(
@@ -500,21 +569,29 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
       const messages = buildAnswerMessages(question, recordsContext, history);
       const config = buildRunConfig('answer-patient', trace);
 
-      // The AUTHORITATIVE result: captured from the structured runnable's terminal output, NOT the
-      // token stream. `assembled` accrues the raw json_schema deltas for display-only extraction.
+      // The AUTHORITATIVE result is captured from the agent's terminal `values` state (or the invoke
+      // fallback) — NOT the token stream. `assembled` accrues the raw json_schema deltas for the
+      // display-only partial parse.
       let parsed: PatientAnswer | null = null;
-      let raw: BaseMessage | undefined;
+      let last: BaseMessage | undefined;
       let assembled = '';
       let lastEmitted = '';
+      let streamError: unknown;
 
       try {
-        // streamEvents (v2) surfaces the inner model's token deltas (`on_chat_model_stream`) AND the
-        // outer runnable's final `{ raw, parsed }` (`on_chain_end`) — tokens + validated parse from
-        // ONE generation.
-        const events = structured.streamEvents(messages, { version: 'v2', ...config });
-        for await (const ev of events) {
-          if (ev.event === 'on_chat_model_stream') {
-            const delta = chunkContentToString((ev.data as { chunk?: unknown } | undefined)?.chunk);
+        // Two stream modes from ONE generation: `messages` → the model's token deltas (the json_schema
+        // payload as content); `values` → the full agent state after each step, the terminal one
+        // carrying the validated `structuredResponse` + final messages (for usage/raw).
+        const stream = await agent.stream(
+          { messages },
+          { ...config, streamMode: ['messages', 'values'] },
+        );
+        for await (const part of stream) {
+          const [mode, chunk] = part as [string, unknown];
+          if (mode === 'messages') {
+            // messages mode → [AIMessageChunk, metadata]; the chunk's content is the json_schema delta.
+            const msgChunk = Array.isArray(chunk) ? chunk[0] : chunk;
+            const delta = chunkContentToString(msgChunk);
             if (!delta) continue;
             assembled += delta;
             const { answerable, answer } = parsePartialAnswer(assembled);
@@ -525,34 +602,62 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
               lastEmitted = answer;
               onToken(answer);
             }
-          } else if (ev.event === 'on_chain_end') {
-            const output = (ev.data as { output?: unknown } | undefined)?.output;
-            if (output && typeof output === 'object' && 'parsed' in output && 'raw' in output) {
-              parsed = (output as { parsed: PatientAnswer | null }).parsed;
-              raw = (output as { raw: BaseMessage }).raw;
-            }
+          } else if (mode === 'values') {
+            const state = chunk as { messages?: BaseMessage[]; structuredResponse?: PatientAnswer };
+            if (state?.structuredResponse) parsed = state.structuredResponse;
+            const m = lastMessage(state?.messages);
+            if (m) last = m;
           }
         }
-      } catch {
-        // A streaming hiccup must not fail the turn — fall through to the authoritative invoke below.
+      } catch (err) {
+        // A streaming hiccup must not fail the turn — remember the error so we can tell a real refusal
+        // (a StructuredOutputParsingError — authoritative, no retry) from a transport blip (retry below).
+        streamError = err;
         parsed = null;
-        raw = undefined;
       }
 
-      // Authoritative fallback: if the stream never yielded the structured output (provider didn't
-      // stream json_schema deltas, the event shape differed, or it threw), do ONE plain invoke for a
-      // correct result. Correctness never depends on the token stream.
-      if (raw === undefined) {
-        const res = await structured.invoke(messages, config);
-        parsed = res.parsed as PatientAnswer | null;
-        raw = res.raw as BaseMessage;
+      // A parse failure thrown mid-stream IS the authoritative answer (a refusal) — return it without
+      // re-invoking (a second generation would just throw the same error, doubling latency + tokens).
+      // `last` may still hold the model message a `values` emission surfaced before the throw, so
+      // usage/raw are reported when available.
+      if (parsed == null && isStructuredOutputParseFailure(streamError)) {
+        return {
+          result: UNANSWERABLE,
+          usage: last ? readUsage(last) : undefined,
+          refused: true,
+          raw: last ? rawContentToString(last) : undefined,
+        };
       }
 
-      const rawText = rawContentToString(raw);
+      // Authoritative fallback: the stream didn't surface a result (a transport blip, or the provider
+      // didn't stream json_schema / the state shape differed) — do ONE plain invoke for a correct
+      // result. Correctness never depends on the token stream.
+      if (parsed == null || last === undefined) {
+        try {
+          const res = await agent.invoke({ messages }, config);
+          parsed = (res.structuredResponse as PatientAnswer | undefined) ?? null;
+          last = lastMessage(res.messages);
+        } catch (err) {
+          // Same split as .answer(): a parse failure → refused; a hard infra error → propagate so the
+          // service logs it as error/high (not an injection signal).
+          if (isStructuredOutputParseFailure(err)) {
+            return {
+              result: UNANSWERABLE,
+              usage: last ? readUsage(last) : undefined,
+              refused: true,
+              raw: last ? rawContentToString(last) : undefined,
+            };
+          }
+          throw err;
+        }
+      }
+
+      const usage = last ? readUsage(last) : undefined;
+      const rawText = last ? rawContentToString(last) : undefined;
       if (parsed == null) {
-        return { result: UNANSWERABLE, usage: readUsage(raw), refused: true, raw: rawText };
+        return { result: UNANSWERABLE, usage, refused: true, raw: rawText };
       }
-      return { result: parsed, usage: readUsage(raw), raw: rawText };
+      return { result: parsed, usage, raw: rawText };
     },
   };
 }

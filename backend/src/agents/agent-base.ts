@@ -170,11 +170,20 @@ export function rawContentToString(raw: BaseMessage): string | undefined {
  * Per-request observability context an agent stamps onto its model call. Recorded in the audit log
  * AND — when LANGSMITH_TRACING is on — forwarded to LangSmith as tags/metadata (see
  * {@link buildRunConfig}), so the find-patient vs answer-patient runs are filterable by agent,
- * cohort, and correlation id.
+ * cohort, and correlation id, and grouped into one conversation thread by {@link TraceContext.sessionId}.
  */
 export interface TraceContext {
   traceId?: string;
   cohort?: string;
+  /**
+   * Conversation/thread id — the SAME value for every request in one chat (the client mints it once
+   * per conversation and echoes it on each call). Forwarded to LangSmith as the `session_id` metadata
+   * key, one of its recognized thread keys, so a conversation's per-turn traces group into ONE thread
+   * (Messages / Turns / Details views) instead of N unrelated rows. Every request in the conversation
+   * — find/select requests and answer requests alike — carries the same value, so all of its runs
+   * group under one thread.
+   */
+  sessionId?: string;
 }
 
 /**
@@ -193,6 +202,10 @@ export function buildRunConfig(agentName: string, ctx?: TraceContext): RunnableC
       agent: agentName,
       ...(ctx?.traceId ? { traceId: ctx.traceId } : {}),
       ...(ctx?.cohort ? { cohort: ctx.cohort } : {}),
+      // `session_id` is one of LangSmith's recognized thread keys. Set it on EVERY run (LangChain
+      // propagates parent metadata to the child model run, satisfying LangSmith's "all child runs"
+      // requirement) so the whole conversation groups into one thread rather than scattered traces.
+      ...(ctx?.sessionId ? { session_id: ctx.sessionId } : {}),
     },
   };
 }
