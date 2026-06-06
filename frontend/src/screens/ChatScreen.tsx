@@ -260,13 +260,17 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         contextSummary: result.answer,
       });
     } else {
+      const fallback = result.fallback ?? '';
       append({
         id: nextId(),
         role: 'assistant',
         // Backend owns the fallback wording — it always sets `fallback` when there's no answer.
-        text: result.fallback ?? '',
+        text: fallback,
         agentName: 'answer-patient',
         patientId: activePatient?.id,
+        // Keep the unanswered turn in history (as its own context) so a later "answer the previous
+        // question" still sees that this turn happened — without it, buildHistory drops the turn.
+        contextSummary: fallback,
         pending: true,
       });
     }
