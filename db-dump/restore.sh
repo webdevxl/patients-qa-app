@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install.sh — Restore the patients-qa Postgres database from this dump.
+# restore.sh — Restore the patients-qa Postgres database from this dump.
 #
 # Loads, in order:
 #   1) schema.sql       — DDL only (extension, tables, indexes, foreign keys)
@@ -93,14 +93,14 @@ Compose-mode options:
 Examples:
   # Server with docker compose: bring up the DB and restore via the container
   docker compose up -d db
-  ./install.sh --docker -y
+  ./restore.sh --docker -y
 
   # Server with docker compose, going through the compose project:
-  ./install.sh --compose --compose-file ../docker-compose.yml -y
+  ./restore.sh --compose --compose-file ../docker-compose.yml -y
 
   # Dev laptop with psql installed:
-  ./install.sh                                # uses /.env at the repo root
-  ./install.sh --env /path/to/.env
+  ./restore.sh                                # uses /.env at the repo root
+  ./restore.sh --env /path/to/.env
 
 WARNING: schema.sql begins with DROP TABLE IF EXISTS … so existing data in the
 target database will be wiped. Point this at the right database.
@@ -210,10 +210,13 @@ case "${MODE}" in
 esac
 
 # ── Dump-file presence checks ───────────────────────────────────────────────
+#
+# The SQL dump files live in the sql/ subdirectory next to this script.
 
-SCHEMA_FILE="${SCRIPT_DIR}/schema.sql"
-DATA_FILE="${SCRIPT_DIR}/data.sql"
-EMBEDDINGS_FILE="${SCRIPT_DIR}/embeddings.sql"
+SQL_DIR="${SCRIPT_DIR}/sql"
+SCHEMA_FILE="${SQL_DIR}/schema.sql"
+DATA_FILE="${SQL_DIR}/data.sql"
+EMBEDDINGS_FILE="${SQL_DIR}/embeddings.sql"
 
 for f in "${SCHEMA_FILE}" "${DATA_FILE}"; do
     if [[ ! -f "${f}" ]]; then

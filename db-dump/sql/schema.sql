@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict x7nB7lZJnm8MmEIb7nxMYuBgAn0qyZfiS2BEexLB8CTU81QrKdWX7BytxBkKUar
+\restrict k4Q0UcfaogWEQkgqVBixnAcFYzWq8qeKZNlTC9q8lENUjqKiklPkC6IXf7ipoeI
 
 -- Dumped from database version 16.14 (Debian 16.14-1.pgdg12+1)
 -- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg12+1)
@@ -23,6 +23,7 @@ ALTER TABLE IF EXISTS ONLY public.patient_medication DROP CONSTRAINT IF EXISTS p
 ALTER TABLE IF EXISTS ONLY public.patient_condition DROP CONSTRAINT IF EXISTS patient_condition_patient_id_fkey;
 ALTER TABLE IF EXISTS ONLY public.patient_allergy DROP CONSTRAINT IF EXISTS patient_allergy_patient_id_fkey;
 ALTER TABLE IF EXISTS ONLY public.patient_allergy DROP CONSTRAINT IF EXISTS patient_allergy_allergen_id_fkey;
+DROP INDEX IF EXISTS public.request_log_variant_idx;
 DROP INDEX IF EXISTS public.request_log_trace_id_key;
 DROP INDEX IF EXISTS public.request_log_resolved_patient_id_idx;
 DROP INDEX IF EXISTS public.request_log_outcome_idx;
@@ -260,7 +261,8 @@ CREATE TABLE public.request_log (
     guard_reason text,
     guard_verdict text,
     answer_reasoning text,
-    extraction_reasoning text
+    extraction_reasoning text,
+    variant text
 );
 
 
@@ -442,6 +444,13 @@ CREATE UNIQUE INDEX request_log_trace_id_key ON public.request_log USING btree (
 
 
 --
+-- Name: request_log_variant_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX request_log_variant_idx ON public.request_log USING btree (variant);
+
+
+--
 -- Name: patient_allergy patient_allergy_allergen_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -485,5 +494,5 @@ ALTER TABLE ONLY public.patient_observation
 -- PostgreSQL database dump complete
 --
 
-\unrestrict x7nB7lZJnm8MmEIb7nxMYuBgAn0qyZfiS2BEexLB8CTU81QrKdWX7BytxBkKUar
+\unrestrict k4Q0UcfaogWEQkgqVBixnAcFYzWq8qeKZNlTC9q8lENUjqKiklPkC6IXf7ipoeI
 

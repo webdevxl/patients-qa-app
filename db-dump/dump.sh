@@ -28,8 +28,8 @@ Options:
                       pg_dump + psql; must be version 16+).
   -h, --help          Show this help.
 
-Output files are written next to this script:
-  schema.sql, data.sql, embeddings.sql
+Output files are written into the sql/ subdirectory next to this script:
+  sql/schema.sql, sql/data.sql, sql/embeddings.sql
 EOF
 }
 
@@ -44,9 +44,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-SCHEMA_OUT="${SCRIPT_DIR}/schema.sql"
-DATA_OUT="${SCRIPT_DIR}/data.sql"
-EMBED_OUT="${SCRIPT_DIR}/embeddings.sql"
+# SQL dump files are written into the sql/ subdirectory next to this script.
+SQL_DIR="${SCRIPT_DIR}/sql"
+mkdir -p "${SQL_DIR}"
+SCHEMA_OUT="${SQL_DIR}/schema.sql"
+DATA_OUT="${SQL_DIR}/data.sql"
+EMBED_OUT="${SQL_DIR}/embeddings.sql"
 
 if [[ -n "${DB_URL}" ]]; then
     pg_dump_cmd=(pg_dump "${DB_URL}")

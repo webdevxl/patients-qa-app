@@ -8,11 +8,11 @@ independently from the relational data.
 
 | File | Contents | Size |
 |------|----------|------|
-| `schema.sql` | DDL only: `vector` extension, all tables (incl. the `embedding` columns), indexes, foreign keys, Prisma migrations table. Begins with `DROP TABLE IF EXISTS …` so re-running is safe. | small |
-| `data.sql` | Row data for **every** table. `allergen` and `icd_code` are written with their `embedding` column **omitted** — those rows are seeded here without vectors. | small |
-| `embeddings.sql` | The `vector(1536)` payloads for `allergen.embedding` and `icd_code.embedding`. Loads into a temp table and `UPDATE`s the parent rows in place, so it's safe to run on a DB that already has the schema + data. | ~10 MB |
-| `install.sh` | Restore script. Supports three modes (local psql, `docker exec`, `docker compose exec`). | — |
-| `dump.sh` | Regenerates the three SQL files from a running source database. Defaults to the local `patients-qa-db` docker container. | — |
+| `sql/schema.sql` | DDL only: `vector` extension, all tables (incl. the `embedding` columns), indexes, foreign keys, Prisma migrations table. Begins with `DROP TABLE IF EXISTS …` so re-running is safe. | small |
+| `sql/data.sql` | Row data for **every** table. `allergen` and `icd_code` are written with their `embedding` column **omitted** — those rows are seeded here without vectors. | small |
+| `sql/embeddings.sql` | The `vector(1536)` payloads for `allergen.embedding` and `icd_code.embedding`. Loads into a temp table and `UPDATE`s the parent rows in place, so it's safe to run on a DB that already has the schema + data. | ~10 MB |
+| `restore.sh` | Restore script. Loads `sql/*.sql` in three modes (local psql, `docker exec`, `docker compose exec`). | — |
+| `dump.sh` | Regenerates the three `sql/*.sql` files from a running source database. Defaults to the local `patients-qa-db` docker container. | — |
 
 ## Target requirements
 
@@ -22,8 +22,8 @@ meta-commands, so an older psql client will fail to parse it.
 
 ## Where to run the script from
 
-**Always invoke `install.sh` from inside the `db-dump/` directory** (i.e. with
-`./install.sh …`). The script uses absolute paths derived from its own
+**Always invoke `restore.sh` from inside the `db-dump/` directory** (i.e. with
+`./restore.sh …`). The script uses absolute paths derived from its own
 location — *not* `$PWD` — so it can find the three SQL files and the sibling
 `/.env` and `docker-compose.yml`. Running it from elsewhere works too, but the
 defaults assume the standard layout:
@@ -32,11 +32,13 @@ defaults assume the standard layout:
 project-root/
 ├── .env                    ← DATABASE_URL for --mode local (single source of truth)
 ├── docker-compose.yml      ← used by default for --mode compose
-└── db-dump/                ← cd here and ./install.sh
-    ├── install.sh
-    ├── schema.sql
-    ├── data.sql
-    └── embeddings.sql
+└── db-dump/                ← cd here and ./restore.sh
+    ├── restore.sh
+    ├── dump.sh
+    └── sql/                 ← the dump files live here
+        ├── schema.sql
+        ├── data.sql
+        └── embeddings.sql
 ```
 
 ## Restoring on a server (Docker / Docker Compose)
@@ -59,12 +61,12 @@ docker compose -f ../docker-compose.yml ps
 
 # (a) docker exec into the container by name (matches docker-compose.yml
 #     container_name: patients-qa-db).
-./install.sh --docker -y
+./restore.sh --docker -y
 
 # (b) Or go through the compose project (no fixed container_name needed).
 #     --compose-file defaults to ../docker-compose.yml so you don't need to
 #     pass it explicitly when running from db-dump/.
-./install.sh --compose -y
+./restore.sh --compose -y
 ```
 
 `--yes` (or `-y`) skips the destructive-action confirmation. Drop it if you
@@ -84,9 +86,9 @@ In either docker-based mode the script:
 ### Pointing at a non-default container or service
 
 ```bash
-./install.sh --docker --container my-pg --db-user app --db-name app_db -y
+./restore.sh --docker --container my-pg --db-user app --db-name app_db -y
 
-./install.sh --compose --service postgres --compose-file ./infra/compose.yml \
+./restore.sh --compose --service postgres --compose-file ./infra/compose.yml \
              --db-user postgres --db-name app_db -y
 ```
 
@@ -96,17 +98,17 @@ If you want a fast schema + data restore for testing and intend to backfill
 embeddings later with the existing `embed-*-compute.ts` scripts:
 
 ```bash
-./install.sh --docker -y --skip-embeddings
+./restore.sh --docker -y --skip-embeddings
 ```
 
 ## Restoring on a dev laptop (host psql)
 
 ```bash
 # Default — reads ../.env (the single source of truth) for DATABASE_URL.
-./install.sh
+./restore.sh
 
 # Or point at a different .env:
-./install.sh --env /path/to/.env
+./restore.sh --env /path/to/.env
 ```
 
 Requires `psql` 16+ on the host. The `.env` file must define `DATABASE_URL`,

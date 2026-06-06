@@ -29,7 +29,7 @@ patients-qa/
 │   └── src/                  # app module, health endpoint, PrismaService
 ├── frontend/                 # Expo app (placeholder screen)
 ├── admin/                    # Next.js observability log viewer (static SPA, no SSR)
-├── db-dump/                  # portable schema + data + embeddings dump w/ install.sh
+├── db-dump/                  # portable schema + data + embeddings dump w/ restore.sh + dump.sh
 └── task/                     # assignment brief + original CSVs
 ```
 
