@@ -181,6 +181,11 @@ export interface QaResult {
   answer?: string;
   confidence?: 'High' | 'Medium' | 'Low';
   citations?: string[];
+  // Per-agent reasoning shown behind a "Show reasoning" disclosure on each chat bubble (and always
+  // in the admin observability panel). Mirrors backend QaResult; absent when the corresponding agent
+  // didn't run or refused before producing structured output.
+  extractionReasoning?: string;
+  answerReasoning?: string;
   usage?: RequestUsage;
 }
 

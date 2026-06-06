@@ -56,6 +56,12 @@ export interface RequestTrace {
   answer: string | null;
   confidence: AnswerConfidence | null;
   citations: string[];
+  // ── Model reasoning (one short rationale per agent that actually ran). Audit-only — these are
+  //    NOT user-facing prose: the find-patient agent explains why it picked the search params, the
+  //    answer-patient agent explains how each clause was grounded (or what was missing on refusal).
+  //    null when that agent never ran or refused before producing structured output. ──
+  extractionReasoning: string | null;
+  answerReasoning: string | null;
   outcome: Outcome;
   fallbackUsed: boolean;
   injectionDetected: boolean;
@@ -97,6 +103,8 @@ export function newTrace(seed: {
     answer: null,
     confidence: null,
     citations: [],
+    extractionReasoning: null,
+    answerReasoning: null,
     outcome: 'error',
     fallbackUsed: false,
     injectionDetected: false,
@@ -171,6 +179,8 @@ export class RequestLogService {
           answer: trace.answer,
           confidence: trace.confidence,
           citations: trace.citations as unknown as Prisma.InputJsonValue,
+          extractionReasoning: trace.extractionReasoning,
+          answerReasoning: trace.answerReasoning,
           outcome: trace.outcome,
           fallbackUsed: trace.fallbackUsed,
           injectionDetected: trace.injectionDetected,

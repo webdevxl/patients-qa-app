@@ -37,6 +37,15 @@ export interface ChatMessage {
    */
   agentName?: AgentName;
   patientId?: string;
+  /**
+   * Per-agent reasoning that produced this turn (from `QaResult.extractionReasoning` /
+   * `answerReasoning`). Rendered ONLY behind the "Show reasoning" disclosure — never inline with the
+   * answer prose. Mutually-exclusive in practice: find-phase bubbles carry `extractionReasoning`,
+   * answer-phase bubbles carry `answerReasoning`, the not-answerable fallback carries `answerReasoning`,
+   * and pre-model fallbacks (empty question, cohort-boundary block) carry neither.
+   */
+  extractionReasoning?: string;
+  answerReasoning?: string;
   /** Marks the safe-fallback / system notices so they can read differently. */
   pending?: boolean;
   /**
@@ -66,6 +75,14 @@ export function MessageBubble({
   const showPlaceholder = !isUser && message.streaming === true && !message.text;
   const showCaret = !isUser && message.streaming === true && !!message.text;
 
+  // Reasoning disclosure (assistant bubbles only). Collapsed by default — the pill is the only
+  // affordance until the user opts in; nothing reasoning-related affects the answer prose.
+  const hasReasoning =
+    !isUser && (!!message.extractionReasoning || !!message.answerReasoning);
+  const [reasoningOpen, setReasoningOpen] = React.useState(false);
+  const hasChips =
+    !!message.confidence || !!message.citations?.length || hasReasoning;
+
   return (
     <XStack
       width="100%"
@@ -84,7 +101,7 @@ export function MessageBubble({
         borderWidth={isUser ? 0 : 1}
         borderColor={palette.hairline}
         style={isUser ? undefined : cardShadow}
-        gap={message.citations?.length || message.confidence ? 8 : 0}
+        gap={hasChips ? 8 : 0}
       >
         <Text
           fontSize={16}
@@ -97,7 +114,7 @@ export function MessageBubble({
         </Text>
 
         {/* Structured assistant metadata */}
-        {!isUser && (message.confidence || message.citations?.length) ? (
+        {!isUser && hasChips ? (
           <XStack flexWrap="wrap" gap={6} alignItems="center">
             {message.confidence ? (
               <XStack
@@ -146,7 +163,94 @@ export function MessageBubble({
                 </Text>
               </XStack>
             ))}
+
+            {hasReasoning ? (
+              <XStack
+                alignItems="center"
+                gap={4}
+                paddingHorizontal={9}
+                paddingVertical={4}
+                borderRadius={radius.chip}
+                backgroundColor={palette.tertiarySystemFill}
+                onPress={() => setReasoningOpen((open) => !open)}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  reasoningOpen ? 'Hide reasoning' : 'Show reasoning'
+                }
+                accessibilityState={{ expanded: reasoningOpen }}
+                cursor="pointer"
+                animation="quick"
+                pressStyle={{ opacity: 0.6 }}
+              >
+                <Ionicons
+                  name={reasoningOpen ? 'chevron-up' : 'chevron-down'}
+                  size={12}
+                  color={palette.navy100}
+                />
+                <Text
+                  fontSize={12}
+                  fontWeight="600"
+                  color={palette.navy100}
+                  letterSpacing={-0.2}
+                >
+                  {reasoningOpen ? 'Hide reasoning' : 'Show reasoning'}
+                </Text>
+              </XStack>
+            ) : null}
           </XStack>
+        ) : null}
+
+        {/* Expanded reasoning panel — appears below the chips when the disclosure is open. Subtle
+            muted card with the agent label on top so the reader knows whose rationale they're seeing. */}
+        {hasReasoning && reasoningOpen ? (
+          <YStack
+            gap={10}
+            paddingVertical={10}
+            paddingHorizontal={12}
+            borderRadius={radius.chip}
+            backgroundColor={palette.tertiarySystemFill}
+          >
+            {message.extractionReasoning ? (
+              <YStack gap={4}>
+                <Text
+                  fontSize={10}
+                  fontWeight="700"
+                  letterSpacing={0.4}
+                  color={palette.tertiaryLabel}
+                >
+                  EXTRACTION
+                </Text>
+                <Text
+                  fontSize={13}
+                  lineHeight={18}
+                  letterSpacing={-0.1}
+                  color={palette.secondaryLabel}
+                >
+                  {message.extractionReasoning}
+                </Text>
+              </YStack>
+            ) : null}
+            {message.answerReasoning ? (
+              <YStack gap={4}>
+                <Text
+                  fontSize={10}
+                  fontWeight="700"
+                  letterSpacing={0.4}
+                  color={palette.tertiaryLabel}
+                >
+                  GROUNDING
+                </Text>
+                <Text
+                  fontSize={13}
+                  lineHeight={18}
+                  letterSpacing={-0.1}
+                  color={palette.secondaryLabel}
+                >
+                  {message.answerReasoning}
+                </Text>
+              </YStack>
+            ) : null}
+          </YStack>
         ) : null}
       </YStack>
     </XStack>

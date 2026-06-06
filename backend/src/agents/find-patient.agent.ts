@@ -47,6 +47,7 @@ export const EMPTY_EXTRACTION: Extraction = {
   allergyQuery: null,
   observationFilter: null,
   medicationFilter: null,
+  reasoning: null,
 };
 
 // ─────────────────────────────────── prompts ─────────────────────────────────
@@ -62,6 +63,7 @@ const EXTRACTION_SYSTEM_PROMPT = `You extract structured search parameters from 
 - allergyQuery: a substance from an "allergic to X" search ACROSS patients ("who is allergic to penicillin?"). The substance only. An allergy is NOT a diagnosis — route "allergic to ..." here, never to conditionQuery. Set BOTH conditionQuery and allergyQuery when the message combines them ("diabetics allergic to penicillin").
 - observationFilter: a numeric comparison over a vital sign / measurement ACROSS patients ("weight over 200 lbs", "heart rate above 100", "oxygen saturation below 90"). metric is one of PainLevel, Weight, Height, BloodPressure, BloodSugar, HeartRate, Temperature, RespiratoryRate, OxygenSaturation; operator is gt/gte/lt/lte/eq/between (value2 only for between); value is the raw number in the metric's NATIVE unit (Lbs, Inches, °F, mg/dL, bpm, mmHg, %, Breaths/min, pain 0–10) — never convert units. For BloodPressure set component to systolic or diastolic (default systolic). Set observationFilter ALONGSIDE conditionQuery/allergyQuery when the message combines them ("diabetics with heart rate over 100"). Leave null when no measurement comparison is asked.
 - medicationFilter: which patients TAKE a drug ("who is on Tylenol?", "patients on 325 mg acetaminophen tablets", "injectable insulin"), optionally narrowed by dose/form/route. names = the drug PLUS its brand/generic synonyms for the SAME drug ("Tylenol" → ["Tylenol","acetaminophen"]); NEVER a therapeutic class (for "painkillers"/"antibiotics" leave medicationFilter null). doseText = the dose as a label prints it (number + space + uppercase unit, e.g. "325 MG"; convert "325 milligrams" → "325 MG"), else null. form = EXACTLY one of Tablet, Capsule, Solution, Suspension, Suppository, Cream, Ointment, Gel, Lotion, Spray, Inhaler ("pill" → Tablet), else null. route = EXACTLY one of Oral, Injection, Ophthalmic, Topical, Rectal, Inhalation, Transdermal, Nasal ("by mouth" → Oral, "shot"/"IV" → Injection, "eye" → Ophthalmic), else null. Set medicationFilter ALONGSIDE conditionQuery/allergyQuery/observationFilter when combined ("diabetics on metformin"). Leave null when no specific medication is named.
+- reasoning: one or two short sentences explaining which words in the latest message (and which earlier turn, if a reference was resolved) drove each non-null field — e.g. "User wrote 'Adolfo Ricker' → name; the trailing 'his allergies' resolves to that patient." Always include this when any field is set; null only when every field is null.
 
 If the message identifies no specific patient and asks for no searchable condition, allergy, measurement, or medication, leave every field empty.`;
 
@@ -139,6 +141,15 @@ export const extractionSchema = z.object({
         'therapeutic class (for "painkillers"/"antibiotics" leave this null). Set this ALONGSIDE ' +
         'conditionQuery/allergyQuery/observationFilter when combined ("diabetics on metformin"). ' +
         'Null when no specific medication is named.',
+    ),
+  reasoning: z
+    .string()
+    .nullable()
+    .describe(
+      'One or two short sentences explaining which tokens in the latest message (and which earlier ' +
+        'turn, if a reference was resolved) drove each non-null field above. Always include this ' +
+        'when any field is set; null only when every other field is also null. Audited; never shown ' +
+        'to the user verbatim.',
     ),
 });
 

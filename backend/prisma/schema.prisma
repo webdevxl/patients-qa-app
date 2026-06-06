@@ -208,6 +208,14 @@ model RequestLog {
   confidence String? // 'High' | 'Medium' | 'Low' | null
   citations  Json? // string[] of source-record labels
 
+  // ── Model reasoning (one short rationale per agent that ran). Audit-only. ──
+  //    extractionReasoning  — why the FIND agent picked these search params (null when the agent
+  //                           refused/returned EMPTY_EXTRACTION or didn't run).
+  //    answerReasoning      — how the ANSWER agent grounded each clause / what was missing (empty
+  //                           string on UNANSWERABLE; null when the answer agent didn't run).
+  extractionReasoning String? @map("extraction_reasoning")
+  answerReasoning     String? @map("answer_reasoning")
+
   // ── Outcome + security flags (the eval's queryable columns) ──
   outcome           String // answered | patients_found | no_match | cohort_violation | injection_refused | not_answerable | error
   fallbackUsed      Boolean @map("fallback_used") // true whenever SAFE_FALLBACK was returned ("safe response")

@@ -80,6 +80,20 @@ export interface QaResult {
   confidence?: AnswerConfidence;
   citations?: string[];
   /**
+   * Per-agent reasoning surfaced to the client (admin observability panel always shows them, chat
+   * UI exposes them behind a disclosure). Both audit-only — never the primary user-facing prose.
+   *   • extractionReasoning — FIND path only: which tokens in the message drove each search param.
+   *                           Absent on the answer path (extraction didn't run), on the empty-question
+   *                           pre-model fallback, or when the find agent refused before producing
+   *                           structured output.
+   *   • answerReasoning     — ANSWER path only: which citations support which clauses, or what was
+   *                           missing on a not-answerable turn. Absent on the find path, on the
+   *                           cohort-boundary block (the answerer never ran), or on a parse-failure
+   *                           refusal that surfaced nothing structured.
+   */
+  extractionReasoning?: string;
+  answerReasoning?: string;
+  /**
    * Best-effort token usage for the single LLM call this request made (the FIND path's extraction
    * or the ANSWER path's generation), surfaced for the client's chat-window usage meter. Absent only
    * when no model call ran (e.g. an empty question) — present even on a post-extraction fallback,
@@ -269,6 +283,10 @@ export class QaService {
         });
         extraction = extractionResult.extraction;
         trace.rawModelOutput = extractionResult.raw ?? null;
+        // Audit-log + client-facing rationale for the search params. null on EMPTY_EXTRACTION /
+        // refusal, since the model never wrote one. Threaded into every downstream find-path return
+        // (success + post-extraction fallback) so the admin Sheet and the chat disclosure see it.
+        trace.extractionReasoning = extraction.reasoning;
         if (extractionResult.refused) {
           // A structured-output refusal is the extractor's injection ceiling tripping — flag it.
           trace.injectionDetected = true;
@@ -302,6 +320,10 @@ export class QaService {
       try {
         const retrieval = await findPatients(this.prisma, this.embeddings, extraction, group);
 
+        // Stable across every post-extraction return below. Null on EMPTY_EXTRACTION → undefined on
+        // the wire (the client field is optional, not nullable).
+        const extractionReasoning = extraction.reasoning ?? undefined;
+
         if (retrieval.matchCount === 0) {
           this.logger.log(
             `🚫 [${shortId}] find_patients → 0 matches (${elapsed()}ms total) → fallback`,
@@ -309,7 +331,9 @@ export class QaService {
           // If extraction refused, the cause was the injection — reflect that over a plain no-match.
           trace.outcome = trace.injectionDetected ? 'injection_refused' : 'no_match';
           trace.fallbackUsed = true;
-          return this.safeFallback(question, traceId, reqUsage);
+          return this.safeFallback(question, traceId, reqUsage, FIND_PATIENT_FALLBACK, {
+            extractionReasoning,
+          });
         }
 
         if (retrieval.patients) {
@@ -320,7 +344,13 @@ export class QaService {
           trace.recordsRetrieved = refsFromRetrieval(retrieval);
           trace.resolvedPatientId = retrieval.patients[0]?.id ?? null;
           trace.outcome = 'patients_found';
-          return this.buildIdentityResult(question, traceId, retrieval, reqUsage);
+          return this.buildIdentityResult(
+            question,
+            traceId,
+            retrieval,
+            reqUsage,
+            extractionReasoning,
+          );
         }
 
         const description = describeSearch(retrieval.query);
@@ -330,17 +360,27 @@ export class QaService {
         trace.retrievalPath = 'attribute';
         trace.recordsRetrieved = refsFromRetrieval(retrieval);
         trace.outcome = 'patients_found';
-        return this.buildAttributeResult(question, traceId, retrieval, description, reqUsage);
+        return this.buildAttributeResult(
+          question,
+          traceId,
+          retrieval,
+          description,
+          reqUsage,
+          extractionReasoning,
+        );
       } catch (err) {
         this.logger.error(
           `💥 [${shortId}] retrieval failed`,
           err instanceof Error ? err.stack : String(err),
         );
-        // Retrieval failed AFTER extraction spent tokens — still report them.
+        // Retrieval failed AFTER extraction spent tokens — still report them. Carry the extraction
+        // reasoning too: the model DID write one even though we can't show the matches.
         trace.outcome = 'error';
         trace.severity = bump(trace.severity, 'high');
         trace.fallbackUsed = true;
-        return this.safeFallback(question, traceId, reqUsage);
+        return this.safeFallback(question, traceId, reqUsage, FIND_PATIENT_FALLBACK, {
+          extractionReasoning: extraction.reasoning ?? undefined,
+        });
       }
     } finally {
       // Single persist for the FIND path — guaranteed to run on every return/throw above.
@@ -453,6 +493,11 @@ export class QaService {
       trace.usage = usage;
       trace.rawModelOutput = raw ?? null;
       trace.confidence = result.confidence ?? null;
+      // The schema makes `reasoning` a required non-null string, but `UNANSWERABLE` carries `''` —
+      // collapse the empty case to null on the trace, and to undefined on the wire (the client field
+      // is optional).
+      const answerReasoning = result.reasoning?.trim() ? result.reasoning : null;
+      trace.answerReasoning = answerReasoning;
       reqUsage = this.toRequestUsage(usage, this.answerPatientAgent.model);
       if (refused) {
         // A structured-output refusal is the answerer's injection ceiling tripping — flag it.
@@ -466,7 +511,11 @@ export class QaService {
         );
         trace.outcome = trace.injectionDetected ? 'injection_refused' : 'not_answerable';
         trace.fallbackUsed = true;
-        return this.safeFallback(question, traceId, reqUsage, ANSWER_FALLBACK);
+        // Carry the answerer's reasoning on the fallback too — it's the most useful audit signal here
+        // ("record has no observations for blood pressure"). Empty/null is fine; the client just hides it.
+        return this.safeFallback(question, traceId, reqUsage, ANSWER_FALLBACK, {
+          answerReasoning: answerReasoning ?? undefined,
+        });
       }
       // Normalize citations (strip stray brackets/space the model may add around labels).
       const citations = result.citations.map((c) => c.replace(/[[\]]/g, '').trim()).filter(Boolean);
@@ -488,6 +537,7 @@ export class QaService {
         answer: result.answer,
         confidence: result.confidence,
         citations,
+        answerReasoning: answerReasoning ?? undefined,
         usage: reqUsage,
       };
     } catch (err) {
@@ -513,6 +563,7 @@ export class QaService {
     traceId: string,
     retrieval: FindPatientsResult,
     usage?: RequestUsage,
+    extractionReasoning?: string,
   ): QaResult {
     const patients = retrieval.patients ?? [];
     return {
@@ -523,6 +574,7 @@ export class QaService {
       contextSummary:
         `Resolved ${countNoun(retrieval.matchCount, 'patient', 'patients')}: ` +
         joinNames(patients.map(fullName)),
+      extractionReasoning,
       usage,
     };
   }
@@ -534,6 +586,7 @@ export class QaService {
     retrieval: FindPatientsResult,
     description: string,
     usage?: RequestUsage,
+    extractionReasoning?: string,
   ): QaResult {
     const matches = retrieval.matches ?? [];
     return {
@@ -544,6 +597,7 @@ export class QaService {
       contextSummary:
         `Search (${description}) → ${countNoun(retrieval.matchCount, 'match', 'matches')}: ` +
         joinNames(matches.map((match) => fullName(match.patient))),
+      extractionReasoning,
       usage,
     };
   }
@@ -555,13 +609,27 @@ export class QaService {
    * ungrounded answer (but NOT for its cohort-boundary block, which keeps the default). `usage` is
    * passed only when a model call already ran (so its tokens are still reported); the pre-model
    * fallbacks (empty question, cohort-boundary block) omit it.
+   *
+   * `reasoning` carries the per-agent rationale that was already collected on the trace — surfaced
+   * to the client so the admin Sheet and chat disclosure can show *why* even on a fallback (e.g. an
+   * unanswerable answer-path turn can still explain what was missing). Cohort-boundary blocks and
+   * empty-question fallbacks omit it — nothing was reasoned.
    */
   private safeFallback(
     question: string,
     traceId: string,
     usage?: RequestUsage,
     fallback: string = FIND_PATIENT_FALLBACK,
+    reasoning: { extractionReasoning?: string; answerReasoning?: string } = {},
   ): QaResult {
-    return { question, traceId, matchCount: 0, fallback, usage };
+    return {
+      question,
+      traceId,
+      matchCount: 0,
+      fallback,
+      extractionReasoning: reasoning.extractionReasoning,
+      answerReasoning: reasoning.answerReasoning,
+      usage,
+    };
   }
 }

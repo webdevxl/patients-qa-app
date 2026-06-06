@@ -259,6 +259,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         // Backend owns the fallback wording — it always sets `fallback` on a 0-match result.
         text: result.fallback ?? '',
         agentName: 'find-patient',
+        // Surface the find agent's rationale even on a no-match — explains WHY the search ran the
+        // way it did. Absent when the extractor refused before producing structured output.
+        extractionReasoning: result.extractionReasoning,
         pending: true,
       });
       return;
@@ -273,6 +276,7 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         : 'I found a match — view the record, or tap Ask to start asking about them.',
       candidates: items,
       agentName: 'find-patient',
+      extractionReasoning: result.extractionReasoning,
       contextSummary: many
         ? `Found ${items.length} candidates: ${items.map((i) => fullName(i.patient)).join(', ')}.`
         : `Found 1 candidate: ${fullName(items[0].patient)}.`,
@@ -293,6 +297,8 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         text: result.answer,
         confidence: result.confidence,
         citations: result.citations,
+        // Grounded rationale — shown only behind the bubble's "Show reasoning" disclosure.
+        answerReasoning: result.answerReasoning,
         contextSummary: result.answer,
         streaming: false,
       });
@@ -301,6 +307,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
       patchMessage(liveId, {
         // Backend owns the fallback wording — it always sets `fallback` when there's no answer.
         text: fallback,
+        // The not-answerable fallback DOES carry reasoning (what was missing from the record); the
+        // cohort-boundary block doesn't. Absent on the wire when the answerer never ran.
+        answerReasoning: result.answerReasoning,
         contextSummary: fallback,
         pending: true,
         streaming: false,

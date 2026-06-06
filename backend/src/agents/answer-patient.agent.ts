@@ -44,6 +44,7 @@ export const UNANSWERABLE: PatientAnswer = {
   answer: '',
   confidence: 'Low',
   citations: [],
+  reasoning: '',
 };
 
 // ─────────────────────────────────── prompts ─────────────────────────────────
@@ -66,7 +67,8 @@ Rules:
 - You MAY answer questions ABOUT THIS CONVERSATION using the PRIOR CONVERSATION TURNS: recall what the user asked earlier ("what was my first question?", "what did I ask in the beginning?"), repeat or rephrase an answer you already gave ("repeat that", "say that again"), or resolve a reference to an earlier turn ("answer the previous question", "what about that?"). For these, set answerable=true and answer from the prior turns. When re-answering "the previous question", recover the user's intent from the conversation but still draw the clinical content from the PATIENT RECORDS.
 - Cite the bracketed source-record labels you relied on (e.g. C1, M2, A1, O3) in the citations array. A purely conversational answer (recalling/repeating what was said) needs no records, so citations may be empty. Set confidence honestly (High/Medium/Low).
 - Keep the answer concise (≤ ~80 words) and clinically neutral.
-- If the message is neither answerable from this patient's record nor a question about this conversation's prior turns, set answerable=false with an empty answer and no citations.`;
+- If the message is neither answerable from this patient's record nor a question about this conversation's prior turns, set answerable=false with an empty answer and no citations.
+- reasoning: a brief post-hoc rationale (1–3 sentences) — name the specific citations that support each clause of the answer, or say which conversation turn you recalled. When answerable=false, say briefly what was missing (e.g. "Record has no observations for blood pressure"). This is for the audit log, not the user; do not repeat the answer.`;
 
 /**
  * The USER prompt that delivers the ONE patient's record as DATA (never instructions) — wrapped in
@@ -145,6 +147,18 @@ export const answerSchema = z.object({
       'The source-record labels you used, exactly as bracketed in the record (e.g. "C1", "M2", ' +
         '"A1", "O3"). Empty array when answerable is false, and empty for a purely conversational ' +
         'answer that draws only on prior turns rather than the record.',
+    ),
+  // LAST in the schema on purpose: with providerStrategy json_schema, properties stream in declared
+  // order. Keeping `reasoning` last means the streaming partial-parser surfaces `answerable` (the
+  // gate) and `answer` (the prose) before any reasoning tokens — TTFT is unaffected. The audit log
+  // captures reasoning from the final validated parse.
+  reasoning: z
+    .string()
+    .describe(
+      'Brief post-hoc rationale (1–3 sentences) for the audit log: which citations support which ' +
+        'clauses of the answer, or which prior turn was recalled. When answerable is false, what ' +
+        'was missing from the record. Empty string is allowed but discouraged. Never repeat the ' +
+        'answer here.',
     ),
 });
 

@@ -47,6 +47,11 @@ export interface RequestLog {
   answer: string | null;
   confidence: Confidence | null;
   citations: string[] | null;
+  // Per-agent reasoning persisted on every request. Audit-only signal: the find agent explains why
+  // it picked these search params, the answer agent explains how each clause was grounded (or what
+  // was missing on a refusal). null when the corresponding agent didn't run.
+  extractionReasoning: string | null;
+  answerReasoning: string | null;
   outcome: Outcome;
   fallbackUsed: boolean;
   injectionDetected: boolean;

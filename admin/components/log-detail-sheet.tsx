@@ -126,6 +126,33 @@ export function LogDetailSheet({
                   </Section>
                 )}
 
+                {(log.extractionReasoning || log.answerReasoning) && (
+                  <Section title="Reasoning">
+                    <div className="space-y-3">
+                      {log.extractionReasoning && (
+                        <div>
+                          <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                            Extraction (find-patient)
+                          </div>
+                          <p className="text-sm leading-relaxed whitespace-pre-wrap text-foreground">
+                            {log.extractionReasoning}
+                          </p>
+                        </div>
+                      )}
+                      {log.answerReasoning && (
+                        <div>
+                          <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                            Answer (answer-patient)
+                          </div>
+                          <p className="text-sm leading-relaxed whitespace-pre-wrap text-foreground">
+                            {log.answerReasoning}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </Section>
+                )}
+
                 {log.history && log.history.length > 0 && (
                   <Section title="Conversation history">
                     <div className="space-y-2">
