@@ -39,6 +39,11 @@ import {
   type ConditionMatch,
 } from '../../agents/tools/find-patients.tool';
 import type { CohortGroup } from '../../shared/security/cohort.types';
+import {
+  INJECTION_GUARD_CLASSIFIER,
+  type InjectionGuardClassifier,
+  type GuardVerdict,
+} from '../../shared/security/injection-guard.classifier';
 import type { TokenSink } from './qa-stream.types';
 
 /**
@@ -130,8 +135,30 @@ export class QaService {
     private readonly embeddings: EmbeddingsService,
     @Inject(FIND_PATIENT_AGENT) private readonly findPatientAgent: FindPatientAgent,
     @Inject(ANSWER_PATIENT_AGENT) private readonly answerPatientAgent: AnswerPatientAgent,
+    @Inject(INJECTION_GUARD_CLASSIFIER) private readonly injectionGuard: InjectionGuardClassifier,
     private readonly requestLog: RequestLogService,
   ) {}
+
+  /**
+   * Apply a guard verdict to the per-request audit-log trace. Shared by the find path (inline call
+   * before extraction) and the answer path (via `onGuardVerdict` runtime context) so both call
+   * sites stamp the same fields the same way. A `block` verdict also escalates severity, sets the
+   * outcome to `injection_refused`, and marks the request as fallback-bound — the caller is
+   * responsible for actually substituting the safe fallback.
+   */
+  private applyGuardVerdict(trace: RequestTrace, verdict: GuardVerdict): void {
+    const { verdict: decision, category, confidence, reason } = verdict;
+    trace.guardVerdict = decision;
+    trace.guardCategory = category;
+    trace.guardConfidence = confidence;
+    trace.guardReason = reason;
+    if (decision === 'block') {
+      trace.injectionDetected = true;
+      trace.severity = bump(trace.severity, 'medium');
+      trace.outcome = 'injection_refused';
+      trace.fallbackUsed = true;
+    }
+  }
 
   /**
    * Compose the client-facing {@link RequestUsage} from an agent's best-effort {@link TokenUsage}
@@ -211,6 +238,20 @@ export class QaService {
       }
       // Bound the prompt so an oversized question can't blow up token spend; history is already capped.
       const boundedQuestion = trimmedQuestion.slice(0, MAX_QUESTION_CHARS);
+
+      // ── 0. Injection guard (find path). The classifier runs BEFORE extraction, so a blocked
+      //       request never reaches the bigger find model. The verdict is always stamped on the
+      //       trace (allow + block alike) — the audit log is the source of truth for what the guard
+      //       saw on every request. A `block` substitutes the verbatim safe fallback; the trace's
+      //       `outcome` / `injectionDetected` / `severity` are already set by `applyGuardVerdict`. ──
+      const guardVerdict = await this.injectionGuard.classify(boundedQuestion);
+      this.applyGuardVerdict(trace, guardVerdict);
+      if (guardVerdict.verdict === 'block') {
+        this.logger.warn(
+          `🛡️ [${shortId}] injection-guard BLOCK (${guardVerdict.category}, ${guardVerdict.confidence}) → safe fallback`,
+        );
+        return this.safeFallback(question, traceId);
+      }
 
       // ── 1. Extract (the only LLM call). A malformed/failed extraction degrades to the safe
       //       fallback rather than throwing a 500. ──
@@ -380,6 +421,18 @@ export class QaService {
       // Feed the answerer ONLY this patient's answer-phase turns — never the find-phase chatter
       // (searches / candidate lists about OTHER patients) or a previously-selected patient's Q&A.
       const answerHistory = answerHistoryForPatient(history, patientId);
+      // The injection-guard middleware (`beforeAgent`) on the answer agent classifies the
+      // clinician's question and short-circuits on `block` (jumpTo: 'end'). The verdict is reported
+      // back here via this callback, so the audit-log trace stamps every guard decision — and a
+      // BLOCK log line surfaces in the server log next to the existing 🛡️ cohort / refusal lines.
+      const onGuardVerdict = (verdict: GuardVerdict): void => {
+        this.applyGuardVerdict(trace, verdict);
+        if (verdict.verdict === 'block') {
+          this.logger.warn(
+            `🛡️ [${shortId}] injection-guard BLOCK (${verdict.category}, ${verdict.confidence}) → safe fallback`,
+          );
+        }
+      };
       // Stream tokens only when a sink was supplied (/qa/stream) — and only HERE, after the cohort
       // re-verify above has passed, so a blocked/unknown id never streams a single token. Both calls
       // return the identical PatientAnswerResult; everything downstream is unchanged.
@@ -388,13 +441,14 @@ export class QaService {
             boundedQuestion,
             context,
             answerHistory,
-            { traceId, cohort: group, sessionId },
+            { traceId, cohort: group, sessionId, onGuardVerdict },
             onToken,
           )
         : await this.answerPatientAgent.answer(boundedQuestion, context, answerHistory, {
             traceId,
             cohort: group,
             sessionId,
+            onGuardVerdict,
           });
       trace.usage = usage;
       trace.rawModelOutput = raw ?? null;

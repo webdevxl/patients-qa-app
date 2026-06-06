@@ -12,6 +12,11 @@ import {
   createAnswerPatientAgent,
   ANSWER_PATIENT_AGENT,
 } from '../../agents/answer-patient.agent';
+import {
+  createInjectionGuardClassifier,
+  INJECTION_GUARD_CLASSIFIER,
+  type InjectionGuardClassifier,
+} from '../../shared/security/injection-guard.classifier';
 
 // PrismaService is available via the @Global() PrismaModule — no import needed here.
 // EmbeddingsModule provides the OpenAI embeddings client for attribute search.
@@ -20,6 +25,21 @@ import {
   controllers: [QaController],
   providers: [
     QaService,
+    // The injection-guard classifier — a small, opt-in LLM call that scores each user message for
+    // prompt-injection / cross-cohort access. Unset OPENAI_GUARD_MODEL ⇒ no-op classifier (zero
+    // tokens, zero latency), so dev/test runs aren't billed and behavior matches the pre-guard
+    // baseline. Wired BEFORE the answer agent so it can be injected into the agent factory below.
+    {
+      provide: INJECTION_GUARD_CLASSIFIER,
+      useFactory: (config: ConfigService) => {
+        const temperature = config.get<string>('OPENAI_GUARD_TEMPERATURE');
+        return createInjectionGuardClassifier({
+          model: config.get<string>('OPENAI_GUARD_MODEL') ?? undefined,
+          temperature: temperature !== undefined ? Number(temperature) : undefined,
+        });
+      },
+      inject: [ConfigService],
+    },
     // The LLM extractor is DI-managed (mockable in tests, config-driven) rather than a field
     // initializer. Model/temperature come from env (OPENAI_CHAT_MODEL / OPENAI_CHAT_TEMPERATURE)
     // with the factory's defaults as fallback; ConfigService is global.
@@ -34,17 +54,22 @@ import {
       },
       inject: [ConfigService],
     },
-    // The grounded answer-patient agent for the patient-scoped path — same config plumbing.
+    // The grounded answer-patient agent for the patient-scoped path — same config plumbing, plus
+    // the injection-guard classifier so its `beforeAgent` middleware can short-circuit blocked
+    // requests before the big answer model runs.
     {
       provide: ANSWER_PATIENT_AGENT,
-      useFactory: (config: ConfigService) => {
+      useFactory: (config: ConfigService, classifier: InjectionGuardClassifier) => {
         const temperature = config.get<string>('OPENAI_CHAT_TEMPERATURE');
-        return createAnswerPatientAgent({
-          model: config.get<string>('OPENAI_CHAT_MODEL') ?? undefined,
-          temperature: temperature !== undefined ? Number(temperature) : undefined,
-        });
+        return createAnswerPatientAgent(
+          {
+            model: config.get<string>('OPENAI_CHAT_MODEL') ?? undefined,
+            temperature: temperature !== undefined ? Number(temperature) : undefined,
+          },
+          classifier,
+        );
       },
-      inject: [ConfigService],
+      inject: [ConfigService, INJECTION_GUARD_CLASSIFIER],
     },
   ],
 })

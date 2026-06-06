@@ -27,6 +27,11 @@ export type Outcome =
 /** Security severity. Monotonic via {@link bump} — a later weaker signal never lowers it. */
 export type Severity = 'none' | 'low' | 'medium' | 'high';
 
+/** Injection-guard decision for one request — mirrors {@link GuardVerdict.verdict}. */
+export type GuardDecision = 'allow' | 'block';
+/** Injection-guard confidence — mirrors {@link GuardVerdict.confidence}. */
+export type GuardConfidence = 'high' | 'medium' | 'low';
+
 /** A provenance reference to a source record (no PHI body — just which table + key). */
 export interface SourceRef {
   table: string;
@@ -56,6 +61,14 @@ export interface RequestTrace {
   injectionDetected: boolean;
   cohortViolation: boolean;
   severity: Severity;
+  // ── Injection-guard verdict (the SMALL classifier run BEFORE the main agent, see
+  //    `injection-guard.classifier.ts`). null when the guard didn't run (e.g. empty question).
+  //    A `block` verdict also escalates `injectionDetected` + `severity` + `outcome`; the verdict
+  //    columns themselves are the AUDITABLE per-request record of what the guard decided. ──
+  guardVerdict?: GuardDecision | null;
+  guardCategory?: string | null;
+  guardConfidence?: GuardConfidence | null;
+  guardReason?: string | null;
   usage?: TokenUsage;
 }
 
@@ -89,6 +102,10 @@ export function newTrace(seed: {
     injectionDetected: false,
     cohortViolation: false,
     severity: 'none',
+    guardVerdict: null,
+    guardCategory: null,
+    guardConfidence: null,
+    guardReason: null,
   };
 }
 
@@ -159,6 +176,10 @@ export class RequestLogService {
           injectionDetected: trace.injectionDetected,
           cohortViolation: trace.cohortViolation,
           severity: trace.severity,
+          guardVerdict: trace.guardVerdict ?? null,
+          guardCategory: trace.guardCategory ?? null,
+          guardConfidence: trace.guardConfidence ?? null,
+          guardReason: trace.guardReason ?? null,
           inputTokens: trace.usage?.inputTokens,
           outputTokens: trace.usage?.outputTokens,
           totalTokens: trace.usage?.totalTokens,

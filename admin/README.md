@@ -18,7 +18,9 @@ Requires the **Nest backend running on :3000** (it serves `/auth/session` and `/
 Sign in with `admin` / `admin` (configurable — see below).
 
 - `npm run build` → static export to `out/` (deploy to any static host).
-- `npm run dev` / `start` run on port **3200** (the backend uses 3000).
+- `npm run dev` runs the dev server on port **3200** (the backend uses 3000).
+- `npm run start` builds the static export and serves `out/` on **3200** via `serve`
+  (`next start` cannot serve an `output: 'export'` build, so it is not used).
 
 ## How it works
 

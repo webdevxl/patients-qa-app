@@ -215,6 +215,15 @@ model RequestLog {
   cohortViolation   Boolean @map("cohort_violation") // the high-severity cross-group event
   severity          String // 'none' | 'low' | 'medium' | 'high'
 
+  // ── Injection-guard verdict (the SMALL classifier — opt-in via OPENAI_GUARD_MODEL). Null when
+  //    the guard didn't run (e.g. empty question); allow + block are BOTH recorded so the audit log
+  //    is the source of truth for what the guard saw on every request. A `block` ALSO sets
+  //    injection_detected + severity + outcome above. See shared/security/injection-guard.* ──
+  guardVerdict      String? @map("guard_verdict") // 'allow' | 'block' | null
+  guardCategory     String? @map("guard_category") // 'system_prompt_override' | 'cross_cohort_access' | 'none' | null
+  guardConfidence   String? @map("guard_confidence") // 'high' | 'medium' | 'low' | null
+  guardReason       String? @map("guard_reason") // one short sentence; audit-log only, never shown to the user
+
   // ── Metrics ──
   inputTokens  Int? @map("input_tokens")
   outputTokens Int? @map("output_tokens")

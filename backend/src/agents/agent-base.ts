@@ -1,6 +1,7 @@
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import type { RunnableConfig } from '@langchain/core/runnables';
+import type { OnGuardVerdict } from '../shared/security/injection-guard.middleware';
 
 /**
  * Shared base for the two Q&A agents (`find-patient.agent.ts` and `answer-patient.agent.ts`):
@@ -184,6 +185,15 @@ export interface TraceContext {
    * group under one thread.
    */
   sessionId?: string;
+  /**
+   * Per-invocation hand-off for the injection-guard verdict. Set ONLY on the ANSWER path (the
+   * find-path runs the classifier inline, not via middleware): `QaService` passes a closure that
+   * stamps the verdict on the request's audit-log trace. Forwarded as the agent's runtime
+   * `context.onGuardVerdict`, which the {@link injectionGuardMiddleware} `beforeAgent` hook calls
+   * with the verdict it just computed. Optional — when the guard is the no-op (env unset) the
+   * callback still fires with an `allow` verdict so the audit log records the decision.
+   */
+  onGuardVerdict?: OnGuardVerdict;
 }
 
 /**

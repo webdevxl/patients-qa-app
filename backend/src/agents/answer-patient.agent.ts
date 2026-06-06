@@ -14,6 +14,11 @@ import {
   type TraceContext,
 } from './agent-base';
 import type { PatientDetail } from './tools/find-patients.tool';
+import {
+  injectionGuardMiddleware,
+  injectionGuardContextSchema,
+} from '../shared/security/injection-guard.middleware';
+import type { InjectionGuardClassifier } from '../shared/security/injection-guard.classifier';
 
 /**
  * The ANSWER-PATIENT agent — the SECOND model step. Where the find-patient agent
@@ -513,7 +518,10 @@ function isStructuredOutputParseFailure(err: unknown): boolean {
  * drives the SAME agent via `stream` for token-by-token prose, with an `invoke` fallback so
  * correctness never depends on the token stream.
  */
-export function createAnswerPatientAgent(options: ChatModelOptions = {}): AnswerPatientAgent {
+export function createAnswerPatientAgent(
+  options: ChatModelOptions = {},
+  classifier: InjectionGuardClassifier,
+): AnswerPatientAgent {
   const model = options.model ?? DEFAULT_CHAT_MODEL;
   const agent = createAgent({
     model: createChatModel(options),
@@ -522,6 +530,11 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
     // providerStrategy = OpenAI-native json_schema (strict): no extra tool/model call, and the JSON
     // streams as message content. answerSchema is all-required, so strict mode needs no `.nullable()`.
     responseFormat: providerStrategy(answerSchema),
+    // The injection-guard `beforeAgent` short-circuits on a `block` verdict (jumpTo: 'end'), so the
+    // big answer model never runs — we only pay the small classifier's tokens. `contextSchema`
+    // mirrors what the middleware declares so callers can pass `{ onGuardVerdict }` at invoke time.
+    middleware: [injectionGuardMiddleware(classifier)],
+    contextSchema: injectionGuardContextSchema,
   });
 
   return {
@@ -535,8 +548,11 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
       const messages = buildAnswerMessages(question, recordsContext, history);
       // The run config names + tags this call (agent:answer-patient, cohort, session_id) for LangSmith.
       const config = buildRunConfig('answer-patient', trace);
+      // Per-invocation runtime context: the guard callback the caller registered (so the audit log
+      // sees every verdict). Empty when the caller didn't register one — the middleware tolerates.
+      const context = { onGuardVerdict: trace?.onGuardVerdict };
       try {
-        const res = await agent.invoke({ messages }, config);
+        const res = await agent.invoke({ messages }, { ...config, context });
         const last = lastMessage(res.messages);
         // structuredResponse is statically non-optional, but a refusal throws before here; `?? null`
         // is purely defensive.
@@ -568,6 +584,8 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
     ): Promise<PatientAnswerResult> {
       const messages = buildAnswerMessages(question, recordsContext, history);
       const config = buildRunConfig('answer-patient', trace);
+      // Same per-invocation context as the non-streaming twin — both paths run the guard.
+      const context = { onGuardVerdict: trace?.onGuardVerdict };
 
       // The AUTHORITATIVE result is captured from the agent's terminal `values` state (or the invoke
       // fallback) — NOT the token stream. `assembled` accrues the raw json_schema deltas for the
@@ -584,7 +602,7 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
         // carrying the validated `structuredResponse` + final messages (for usage/raw).
         const stream = await agent.stream(
           { messages },
-          { ...config, streamMode: ['messages', 'values'] },
+          { ...config, context, streamMode: ['messages', 'values'] },
         );
         for await (const part of stream) {
           const [mode, chunk] = part as [string, unknown];
@@ -631,10 +649,11 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
 
       // Authoritative fallback: the stream didn't surface a result (a transport blip, or the provider
       // didn't stream json_schema / the state shape differed) — do ONE plain invoke for a correct
-      // result. Correctness never depends on the token stream.
+      // result. Correctness never depends on the token stream. The guard re-runs (cheap classifier
+      // call) on the retry — leaving `context` off would let a block be silently bypassed here.
       if (parsed == null || last === undefined) {
         try {
-          const res = await agent.invoke({ messages }, config);
+          const res = await agent.invoke({ messages }, { ...config, context });
           parsed = (res.structuredResponse as PatientAnswer | undefined) ?? null;
           last = lastMessage(res.messages);
         } catch (err) {
