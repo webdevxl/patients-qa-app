@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from './prisma/prisma.service';
+import { PrismaService } from '../../shared/prisma/prisma.service';
 
 @Injectable()
-export class AppService {
+export class HealthService {
   constructor(private readonly prisma: PrismaService) {}
 
   getRoot() {

@@ -17,8 +17,8 @@
  */
 import { createAgent } from 'langchain';
 import { PrismaClient } from '@prisma/client';
-import type { PrismaService } from '../prisma/prisma.service';
-import { EmbeddingsService } from '../embeddings/embeddings.service';
+import type { PrismaService } from '../shared/prisma/prisma.service';
+import { EmbeddingsService } from '../shared/embeddings/embeddings.service';
 import { createFindPatientsTool } from './tools/find-patients.tool';
 import { createChatModel } from './agent-base';
 import { createTracingMiddleware } from './middleware/tracing.middleware';

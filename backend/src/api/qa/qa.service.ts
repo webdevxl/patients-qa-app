@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { PrismaService } from '../prisma/prisma.service';
-import { EmbeddingsService } from '../embeddings/embeddings.service';
+import { PrismaService } from '../../shared/prisma/prisma.service';
+import { EmbeddingsService } from '../../shared/embeddings/embeddings.service';
 import {
   SAFE_FALLBACK,
   CONTEXT_WINDOW_TOKENS,
@@ -9,25 +9,25 @@ import {
   type ChatTurn,
   type TokenUsage,
   type RequestUsage,
-} from '../agents/agent-base';
+} from '../../agents/agent-base';
 import {
   RequestLogService,
   newTrace,
   refsFromRetrieval,
   bump,
   type RequestTrace,
-} from '../observability/request-log.service';
+} from '../../shared/observability/request-log.service';
 import {
   FIND_PATIENT_AGENT,
   type FindPatientAgent,
   type Extraction,
-} from '../agents/find-patient.agent';
+} from '../../agents/find-patient.agent';
 import {
   ANSWER_PATIENT_AGENT,
   serializePatientForPrompt,
   type AnswerPatientAgent,
   type AnswerConfidence,
-} from '../agents/answer-patient.agent';
+} from '../../agents/answer-patient.agent';
 import {
   findPatients,
   patientInclude,
@@ -35,8 +35,8 @@ import {
   type FindPatientsResult,
   type PatientDetail,
   type ConditionMatch,
-} from '../agents/tools/find-patients.tool';
-import type { CohortGroup } from '../auth/cohort.types';
+} from '../../agents/tools/find-patients.tool';
+import type { CohortGroup } from '../../shared/security/cohort.types';
 
 /**
  * Response returned to the client. The model only extracts search params — it never composes

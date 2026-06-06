@@ -23,7 +23,7 @@ import { PrismaClient } from '@prisma/client';
 import {
   createEmbeddingsClient,
   EMBEDDING_MODEL,
-} from '../src/embeddings/embeddings.factory';
+} from '../src/shared/embeddings/embeddings.factory';
 
 const ARTIFACT = join(__dirname, 'seed-data', 'allergen-embeddings.json');
 const BATCH = 256;

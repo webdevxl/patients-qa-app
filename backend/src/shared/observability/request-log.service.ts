@@ -1,10 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import type { ChatTurn, TokenUsage } from '../agents/agent-base';
-import type { AnswerConfidence } from '../agents/answer-patient.agent';
-import type { FindPatientsResult } from '../agents/tools/find-patients.tool';
-import type { CohortGroup } from '../auth/cohort.types';
+import type { ChatTurn, TokenUsage } from '../../agents/agent-base';
+import type { AnswerConfidence } from '../../agents/answer-patient.agent';
+import type { FindPatientsResult } from '../../agents/tools/find-patients.tool';
+import type { CohortGroup } from '../security/cohort.types';
 
 /**
  * Observability for the Q&A pipeline. One {@link RequestTrace} is assembled per request inside

@@ -1,9 +1,9 @@
 import { Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { QaService, QaResult } from './qa.service';
-import { RequestLogService } from '../observability/request-log.service';
-import type { ChatTurn } from '../agents/agent-base';
-import { ActiveCohort } from '../auth/active-cohort.decorator';
-import type { CohortGroup } from '../auth/cohort.types';
+import { RequestLogService } from '../../shared/observability/request-log.service';
+import type { ChatTurn } from '../../agents/agent-base';
+import { ActiveCohort } from '../../shared/security/active-cohort.decorator';
+import type { CohortGroup } from '../../shared/security/cohort.types';
 
 @Controller('qa')
 export class QaController {

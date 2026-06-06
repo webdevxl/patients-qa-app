@@ -15,7 +15,7 @@ import 'dotenv/config';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';
-import { toVectorLiteral } from '../src/embeddings/embeddings.factory';
+import { toVectorLiteral } from '../src/shared/embeddings/embeddings.factory';
 
 const ARTIFACT = join(__dirname, 'seed-data', 'allergen-embeddings.json');
 

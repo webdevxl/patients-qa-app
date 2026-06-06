@@ -1,14 +1,14 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule, type JwtSignOptions } from '@nestjs/jwt';
-import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 
 /**
- * Owns session-token signing/verification. `JwtModule` is configured from env (`JWT_SECRET`
- * required — fail fast if absent so we never sign with an empty/default key; `JWT_EXPIRES_IN`
- * optional, default 12h). `AuthService` is exported so the globally-registered `CohortAuthGuard`
- * (wired in AppModule) can verify tokens on every guarded request.
+ * Shared security layer. Owns session-token signing/verification — `JwtModule` is configured from
+ * env (`JWT_SECRET` required — fail fast if absent so we never sign with an empty/default key;
+ * `JWT_EXPIRES_IN` optional, default 12h). `AuthService` is exported so both the globally-registered
+ * `CohortAuthGuard` (wired in AppModule) and the `AuthController` in `api/auth` (the HTTP surface)
+ * can use it. Lives outside `api/` so nothing under `agents/`/`security/` depends back up on `api/`.
  */
 @Module({
   imports: [
@@ -28,8 +28,7 @@ import { AuthService } from './auth.service';
       },
     }),
   ],
-  controllers: [AuthController],
   providers: [AuthService],
   exports: [AuthService],
 })
-export class AuthModule {}
+export class SecurityModule {}

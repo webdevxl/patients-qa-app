@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
-import { PrismaModule } from './prisma/prisma.module';
-import { QaModule } from './qa/qa.module';
-import { AuthModule } from './auth/auth.module';
-import { CohortAuthGuard } from './auth/cohort-auth.guard';
-import { AppController } from './app.controller';
-import { AppService } from './app.service';
+import { PrismaModule } from './shared/prisma/prisma.module';
+import { SecurityModule } from './shared/security/security.module';
+import { QaModule } from './api/qa/qa.module';
+import { ApiAuthModule } from './api/auth/auth.module';
+import { HealthModule } from './api/health/health.module';
+import { CohortAuthGuard } from './shared/security/cohort-auth.guard';
 
 /**
  * Fail fast at boot on missing required secrets, rather than at first request (the LLM/embeddings
@@ -25,12 +25,12 @@ function validateEnv(config: Record<string, unknown>): Record<string, unknown> {
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     PrismaModule,
-    AuthModule,
+    SecurityModule,
+    HealthModule,
+    ApiAuthModule,
     QaModule,
   ],
-  controllers: [AppController],
   providers: [
-    AppService,
     // Deny-by-default: every route requires a valid session token unless marked @Public().
     { provide: APP_GUARD, useClass: CohortAuthGuard },
   ],

@@ -20,7 +20,7 @@ import { PrismaClient } from '@prisma/client';
 import {
   normalizeAllergen,
   type CanonicalAllergen,
-} from '../src/allergens/allergen-normalize';
+} from '../src/common/allergen-normalize';
 
 const prisma = new PrismaClient();
 const DATA_DIR = join(__dirname, 'seed-data');

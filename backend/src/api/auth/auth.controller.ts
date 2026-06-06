@@ -1,7 +1,7 @@
 import { BadRequestException, Body, Controller, Logger, Post } from '@nestjs/common';
-import { AuthService } from './auth.service';
-import { Public } from './public.decorator';
-import { isCohortGroup, type CohortGroup } from './cohort.types';
+import { AuthService } from '../../shared/security/auth.service';
+import { Public } from '../../shared/security/public.decorator';
+import { isCohortGroup, type CohortGroup } from '../../shared/security/cohort.types';
 
 /**
  * The one route exempt from auth (`@Public()`): the clinician picks a cohort and gets back a
