@@ -4,6 +4,9 @@ Portable dump of the `patients_qa` Postgres database split into three layers so
 that the bulky pgvector embeddings can be shipped, stored, and restored
 independently from the relational data.
 
+The SQL dump files live in the `sql/` subdirectory; the two scripts
+(`restore.sh`, `dump.sh`) sit at the top of `db-dump/`.
+
 ## Files
 
 | File | Contents | Size |
@@ -24,7 +27,7 @@ meta-commands, so an older psql client will fail to parse it.
 
 **Always invoke `restore.sh` from inside the `db-dump/` directory** (i.e. with
 `./restore.sh …`). The script uses absolute paths derived from its own
-location — *not* `$PWD` — so it can find the three SQL files and the sibling
+location — *not* `$PWD` — so it can find the `sql/` dump files and the sibling
 `/.env` and `docker-compose.yml`. Running it from elsewhere works too, but the
 defaults assume the standard layout:
 
@@ -35,7 +38,7 @@ project-root/
 └── db-dump/                ← cd here and ./restore.sh
     ├── restore.sh
     ├── dump.sh
-    └── sql/                 ← the dump files live here
+    └── sql/                ← the dump files live here
         ├── schema.sql
         ├── data.sql
         └── embeddings.sql
@@ -50,7 +53,8 @@ Likewise, the root `/.env` file is **not required** for `--docker` or
 
 ```bash
 # 1) Copy this db-dump/ directory onto the server (inside the project repo
-#    so docker-compose.yml is at ../docker-compose.yml).
+#    so docker-compose.yml is at ../docker-compose.yml). Copy the whole
+#    directory — sql/embeddings.sql is ~10 MB and must come along.
 cd /opt/patients-qa-app/db-dump
 
 # 2) Bring up the DB container and wait for it to be healthy.
@@ -75,6 +79,7 @@ want to be prompted.
 In either docker-based mode the script:
 
 - checks the container/service is actually running before doing anything,
+- verifies all `sql/*.sql` files are present (fails fast with the missing path),
 - pipes the SQL files in over stdin (no need to mount or `docker cp` them),
 - applies `schema.sql` → `data.sql` → `embeddings.sql` in order,
 - aborts on the first SQL error (`-v ON_ERROR_STOP=1`),
@@ -95,7 +100,8 @@ In either docker-based mode the script:
 ### Skipping embeddings
 
 If you want a fast schema + data restore for testing and intend to backfill
-embeddings later with the existing `embed-*-compute.ts` scripts:
+embeddings later with the existing `embed-*-compute.ts` scripts (or if
+`sql/embeddings.sql` simply isn't on this machine):
 
 ```bash
 ./restore.sh --docker -y --skip-embeddings
@@ -115,6 +121,8 @@ Requires `psql` 16+ on the host. The `.env` file must define `DATABASE_URL`,
 e.g. `DATABASE_URL="postgresql://user:pass@host:5432/dbname"`.
 
 ## Regenerating the dump
+
+`dump.sh` writes the three files into `sql/` (creating it if needed):
 
 ```bash
 ./dump.sh                          # from the local docker container (default)
