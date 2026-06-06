@@ -27,6 +27,7 @@ patients-qa/
 │   │   └── seed-data/        # copies of the source CSVs
 │   └── src/                  # app module, health endpoint, PrismaService
 ├── frontend/                 # Expo app (placeholder screen)
+├── admin/                    # Next.js observability log viewer (static SPA, no SSR)
 └── task/                     # assignment brief + original CSVs
 ```
 
@@ -112,6 +113,34 @@ The app currently renders a placeholder screen confirming it builds.
 > press `w`); web mode then serves the actual rendered app on the same port.
 > Note that web mode renders the UI full-window via `react-native-web` — it is
 > **not** a phone-frame emulator. For a device frame, use `i` / `a` / Expo Go.
+
+### 4. Admin panel — observability log viewer
+
+A standalone **Next.js** app (client-rendered SPA, no SSR) that renders the observability
+audit log (`GET /qa/logs`) as a sortable, filterable data table with a click-through detail
+drawer (ShadCN). Styled to match the CareBrain brand.
+
+```bash
+cd admin
+cp .env.example .env.local      # defaults point at the backend on :3000
+npm install
+npm run dev                     # http://localhost:3200
+```
+
+Sign in with the primitive gate (`admin` / `admin` by default — configurable via
+`NEXT_PUBLIC_ADMIN_USER` / `NEXT_PUBLIC_ADMIN_PASSWORD` in `.env.local`). It needs the
+**backend running on :3000** — the admin mints a cohort session token under the hood to
+authorize `/qa/logs`. `npm run build` emits a fully static bundle to `admin/out/`.
+
+> **⚠️ The login is a UI gate only, not real auth** — `NEXT_PUBLIC_*` values are inlined
+> into the browser bundle. A real deployment would gate `/qa/logs` behind a server-side
+> admin role (see `SECURITY.md`).
+>
+> **npm gotcha:** if `npm install` later fails to render styles with
+> `Cannot find module '…lightningcss.darwin-arm64.node'`, your global `~/.npmrc` has
+> `os=macos` (it should be `darwin`, or unset), which makes npm skip platform-specific
+> optional deps. Fix the npmrc, or reinstall the binary with
+> `npm install lightningcss-darwin-arm64 --os=darwin --cpu=arm64 --no-save`.
 
 ## Useful scripts (backend)
 
