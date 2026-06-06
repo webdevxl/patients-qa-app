@@ -1,5 +1,6 @@
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
+import type { RunnableConfig } from '@langchain/core/runnables';
 
 /**
  * Shared base for the two Q&A agents (`find-patient.agent.ts` and `answer-patient.agent.ts`):
@@ -95,6 +96,54 @@ export function readUsage(raw: BaseMessage): TokenUsage | undefined {
     inputTokens: usage.input_tokens,
     outputTokens: usage.output_tokens,
     totalTokens: usage.total_tokens,
+  };
+}
+
+/**
+ * Best-effort RAW model output for the audit log. Under OpenAI strict structured-outputs the textual
+ * `content` is usually empty and the structured payload rides in the tool call, so fall back to the
+ * first tool call's args. Returns undefined when nothing usable is present (no model call / refusal
+ * with no content).
+ */
+export function rawContentToString(raw: BaseMessage): string | undefined {
+  const msg = raw as AIMessage;
+  if (typeof msg.content === 'string' && msg.content.trim().length > 0) return msg.content;
+  if (Array.isArray(msg.content) && msg.content.length > 0) return JSON.stringify(msg.content);
+  const toolArgs = msg.tool_calls?.[0]?.args;
+  if (toolArgs !== undefined) return JSON.stringify(toolArgs);
+  return undefined;
+}
+
+// ─────────────────────────────── trace context ───────────────────────────────
+
+/**
+ * Per-request observability context an agent stamps onto its model call. Recorded in the audit log
+ * AND — when LANGSMITH_TRACING is on — forwarded to LangSmith as tags/metadata (see
+ * {@link buildRunConfig}), so the find-patient vs answer-patient runs are filterable by agent,
+ * cohort, and correlation id.
+ */
+export interface TraceContext {
+  traceId?: string;
+  cohort?: string;
+}
+
+/**
+ * Build the {@link RunnableConfig} for an agent's `.invoke()` so its run is NAMED and TAGGED by agent
+ * (+ cohort / traceId). Purely observability — it does not change the model output, and when
+ * LANGSMITH_TRACING is off the fields are simply ignored. This is what lets the two agents be
+ * traced/filtered separately in LangSmith (`agent:find-patient` / `agent:answer-patient`).
+ */
+export function buildRunConfig(agentName: string, ctx?: TraceContext): RunnableConfig {
+  const tags = ['patients-qa', `agent:${agentName}`];
+  if (ctx?.cohort) tags.push(`cohort:${ctx.cohort}`);
+  return {
+    runName: agentName,
+    tags,
+    metadata: {
+      agent: agentName,
+      ...(ctx?.traceId ? { traceId: ctx.traceId } : {}),
+      ...(ctx?.cohort ? { cohort: ctx.cohort } : {}),
+    },
   };
 }
 

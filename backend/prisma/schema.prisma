@@ -179,3 +179,53 @@ model IcdCode {
 
   @@map("icd_code")
 }
+
+// Per-request audit log. Exactly one row per /qa/query request, written by RequestLogService
+// (best-effort; never blocks the response). This is the auditable, queryable store the eval reads
+// ("was the cross-group attempt BLOCKED, LOGGED, and answered SAFELY?"). Cohort-AGNOSTIC table:
+// `group` is a recorded attribute, not a scoping key — rows span BOTH cohorts by design. It is the
+// system-of-record for the audit trail; LangSmith (when LANGSMITH_TRACING is on) is the complementary
+// deep-trace layer, with each agent's run tagged `agent:<name>` so the two agents are filterable there.
+model RequestLog {
+  id                String   @id @default(uuid())
+  traceId           String   @unique @map("trace_id") // matches QaResult.traceId + the server log lines
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // ── Request context ──
+  group             String // active cohort 'A' | 'B'
+  agent             String? // which agent ran: 'find-patient' | 'answer-patient' | null (no model call)
+  question          String // bounded upstream (MAX_QUESTION_CHARS)
+  history           Json? // sanitized prior turns (ChatTurn[])
+  resolvedPatientId String? @map("resolved_patient_id") // patient identified/answered-about, if any
+  retrievalPath     String  @map("retrieval_path") // 'identity' | 'attribute' | 'none'
+
+  // ── Retrieval + model I/O ──
+  recordsRetrieved Json? @map("records_retrieved") // [{ table, id }] source-table provenance refs
+  rawModelOutput   Json? @map("raw_model_output") // raw text / tool-call args the model emitted
+
+  // ── Structured response ──
+  answer     String? // grounded prose (answer path only)
+  confidence String? // 'High' | 'Medium' | 'Low' | null
+  citations  Json? // string[] of source-record labels
+
+  // ── Outcome + security flags (the eval's queryable columns) ──
+  outcome           String // answered | patients_found | no_match | cohort_violation | injection_refused | not_answerable | error
+  fallbackUsed      Boolean @map("fallback_used") // true whenever SAFE_FALLBACK was returned ("safe response")
+  injectionDetected Boolean @map("injection_detected")
+  cohortViolation   Boolean @map("cohort_violation") // the high-severity cross-group event
+  severity          String // 'none' | 'low' | 'medium' | 'high'
+
+  // ── Metrics ──
+  inputTokens  Int? @map("input_tokens")
+  outputTokens Int? @map("output_tokens")
+  totalTokens  Int? @map("total_tokens")
+  durationMs   Int  @map("duration_ms")
+
+  @@index([group])
+  @@index([agent])
+  @@index([createdAt])
+  @@index([resolvedPatientId])
+  @@index([outcome])
+  @@index([cohortViolation])
+  @@map("request_log")
+}

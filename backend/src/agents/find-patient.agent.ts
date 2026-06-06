@@ -13,10 +13,13 @@ import {
   createChatModel,
   sanitizeAndTrim,
   readUsage,
+  rawContentToString,
+  buildRunConfig,
   DEFAULT_CHAT_MODEL,
   type ChatModelOptions,
   type ChatTurn,
   type TokenUsage,
+  type TraceContext,
 } from './agent-base';
 
 /**
@@ -147,12 +150,18 @@ export interface ExtractionResult {
   usage?: TokenUsage;
   /** True when the model refused / returned unparseable output and we substituted EMPTY_EXTRACTION. */
   refused?: boolean;
+  /** Best-effort raw model output (structured tool-call args / text) — recorded in the audit log. */
+  raw?: string;
 }
 
 export interface FindPatientAgent {
   /** The resolved chat model name (env override or default) — surfaced so the service can report it. */
   readonly model: string;
-  extract(question: string, history?: ChatTurn[]): Promise<ExtractionResult>;
+  extract(
+    question: string,
+    history?: ChatTurn[],
+    trace?: TraceContext,
+  ): Promise<ExtractionResult>;
 }
 
 /**
@@ -178,7 +187,11 @@ export function createFindPatientAgent(options: ChatModelOptions = {}): FindPati
 
   return {
     model,
-    async extract(question: string, history: ChatTurn[] = []): Promise<ExtractionResult> {
+    async extract(
+      question: string,
+      history: ChatTurn[] = [],
+      trace?: TraceContext,
+    ): Promise<ExtractionResult> {
       const messages: BaseMessage[] = [
         new SystemMessage(EXTRACTION_SYSTEM_PROMPT),
         ...sanitizeAndTrim(history).map((turn) =>
@@ -188,11 +201,16 @@ export function createFindPatientAgent(options: ChatModelOptions = {}): FindPati
         ),
         new HumanMessage(question),
       ];
-      const { raw, parsed } = await structured.invoke(messages);
+      // The run config names + tags this call (agent:find-patient, cohort, variant) for LangSmith.
+      const { raw, parsed } = await structured.invoke(
+        messages,
+        buildRunConfig('find-patient', trace),
+      );
+      const rawText = rawContentToString(raw);
       if (parsed == null) {
-        return { extraction: EMPTY_EXTRACTION, usage: readUsage(raw), refused: true };
+        return { extraction: EMPTY_EXTRACTION, usage: readUsage(raw), refused: true, raw: rawText };
       }
-      return { extraction: parsed, usage: readUsage(raw) };
+      return { extraction: parsed, usage: readUsage(raw), raw: rawText };
     },
   };
 }

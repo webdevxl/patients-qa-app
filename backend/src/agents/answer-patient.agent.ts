@@ -9,10 +9,13 @@ import {
   createChatModel,
   sanitizeAndTrim,
   readUsage,
+  rawContentToString,
+  buildRunConfig,
   DEFAULT_CHAT_MODEL,
   type ChatModelOptions,
   type ChatTurn,
   type TokenUsage,
+  type TraceContext,
 } from './agent-base';
 import type { PatientDetail } from './tools/find-patients.tool';
 
@@ -124,6 +127,8 @@ export interface PatientAnswerResult {
   usage?: TokenUsage;
   /** True when the model refused / returned unparseable output and we substituted {@link UNANSWERABLE}. */
   refused?: boolean;
+  /** Best-effort raw model output (structured tool-call args / text) — recorded in the audit log. */
+  raw?: string;
 }
 
 export interface AnswerPatientAgent {
@@ -133,6 +138,7 @@ export interface AnswerPatientAgent {
     question: string,
     recordsContext: string,
     history?: ChatTurn[],
+    trace?: TraceContext,
   ): Promise<PatientAnswerResult>;
 }
 
@@ -345,6 +351,7 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
       question: string,
       recordsContext: string,
       history: ChatTurn[] = [],
+      trace?: TraceContext,
     ): Promise<PatientAnswerResult> {
       const messages: BaseMessage[] = [
         new SystemMessage(ANSWER_SYSTEM_PROMPT),
@@ -354,11 +361,16 @@ export function createAnswerPatientAgent(options: ChatModelOptions = {}): Answer
         ),
         new HumanMessage(question),
       ];
-      const { raw, parsed } = await structured.invoke(messages);
+      // The run config names + tags this call (agent:answer-patient, cohort, variant) for LangSmith.
+      const { raw, parsed } = await structured.invoke(
+        messages,
+        buildRunConfig('answer-patient', trace),
+      );
+      const rawText = rawContentToString(raw);
       if (parsed == null) {
-        return { result: UNANSWERABLE, usage: readUsage(raw), refused: true };
+        return { result: UNANSWERABLE, usage: readUsage(raw), refused: true, raw: rawText };
       }
-      return { result: parsed, usage: readUsage(raw) };
+      return { result: parsed, usage: readUsage(raw), raw: rawText };
     },
   };
 }

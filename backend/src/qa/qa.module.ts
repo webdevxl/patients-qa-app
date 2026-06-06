@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { QaController } from './qa.controller';
 import { QaService } from './qa.service';
 import { EmbeddingsModule } from '../embeddings/embeddings.module';
+import { ObservabilityModule } from '../observability/observability.module';
 import {
   createFindPatientAgent,
   FIND_PATIENT_AGENT,
@@ -15,7 +16,7 @@ import {
 // PrismaService is available via the @Global() PrismaModule — no import needed here.
 // EmbeddingsModule provides the OpenAI embeddings client for attribute search.
 @Module({
-  imports: [EmbeddingsModule],
+  imports: [EmbeddingsModule, ObservabilityModule],
   controllers: [QaController],
   providers: [
     QaService,

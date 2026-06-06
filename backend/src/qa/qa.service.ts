@@ -5,10 +5,18 @@ import { EmbeddingsService } from '../embeddings/embeddings.service';
 import {
   SAFE_FALLBACK,
   CONTEXT_WINDOW_TOKENS,
+  sanitizeAndTrim,
   type ChatTurn,
   type TokenUsage,
   type RequestUsage,
 } from '../agents/agent-base';
+import {
+  RequestLogService,
+  newTrace,
+  refsFromRetrieval,
+  bump,
+  type RequestTrace,
+} from '../observability/request-log.service';
 import {
   FIND_PATIENT_AGENT,
   type FindPatientAgent,
@@ -119,6 +127,7 @@ export class QaService {
     private readonly embeddings: EmbeddingsService,
     @Inject(FIND_PATIENT_AGENT) private readonly findPatientAgent: FindPatientAgent,
     @Inject(ANSWER_PATIENT_AGENT) private readonly answerPatientAgent: AnswerPatientAgent,
+    private readonly requestLog: RequestLogService,
   ) {}
 
   /**
@@ -145,14 +154,27 @@ export class QaService {
 
     const trimmedQuestion = (question ?? '').trim();
 
+    // One audit-log accumulator per request: mutated as signals surface, persisted exactly once in
+    // the `finally` below (or, for the patient path, by answerAboutPatient's own finally). Seeded
+    // with safe defaults (outcome: 'error') so even an unexpected throw still writes a sane row.
+    const trace = newTrace({
+      traceId,
+      startedAt,
+      group,
+      question: trimmedQuestion,
+      history: sanitizeAndTrim(history),
+    });
+
     // ── Patient-scoped ANSWER path. When the client has a patient selected it pins it by id; we
     //    answer about THAT patient (re-verified under the cohort) instead of resolving one from
-    //    text. Branch BEFORE extraction — there is no search to run here. ──
+    //    text. Branch BEFORE extraction — there is no search to run here. The SAME trace is handed
+    //    off; answerAboutPatient owns the persist, so this request logs exactly once. ──
     if (patientId) {
       return this.answerAboutPatient(group, patientId, trimmedQuestion, history, {
         traceId,
         shortId,
         elapsed,
+        trace,
       });
     }
 
@@ -160,72 +182,107 @@ export class QaService {
       `🏁 [${shortId}] qa query — cohort ${group} — "${trimmedQuestion.slice(0, 120)}" ` +
         `(history: ${history?.length ?? 0} turn(s))`,
     );
-    if (!trimmedQuestion) return this.safeFallback(question, traceId);
-    // Bound the prompt so an oversized question can't blow up token spend; history is already capped.
-    const boundedQuestion = trimmedQuestion.slice(0, MAX_QUESTION_CHARS);
 
-    // ── 1. Extract (the only LLM call). A malformed/failed extraction degrades to the safe
-    //       fallback rather than throwing a 500. ──
-    let extraction: Extraction;
-    // Captured here so every downstream result — matches, identity, OR a post-extraction fallback —
-    // reports the tokens this call already spent. The empty-question fallback above ran before this,
-    // so it correctly carries no usage.
-    let reqUsage: RequestUsage | undefined;
     try {
-      const extractionResult = await this.findPatientAgent.extract(boundedQuestion, history);
-      extraction = extractionResult.extraction;
-      if (extractionResult.refused) {
-        this.logger.warn(`🛡️ [${shortId}] extractor refused / returned null → safe fallback`);
+      if (!trimmedQuestion) {
+        trace.outcome = 'no_match';
+        trace.fallbackUsed = true;
+        return this.safeFallback(question, traceId);
       }
-      const usage = extractionResult.usage;
-      reqUsage = this.toRequestUsage(usage, this.findPatientAgent.model);
-      this.logger.log(
-        `🔎 [${shortId}] extracted ${JSON.stringify(extraction)} in ${elapsed()}ms` +
-          (usage
-            ? ` | tokens in/out/total: ${usage.inputTokens ?? '?'}/` +
-              `${usage.outputTokens ?? '?'}/${usage.totalTokens ?? '?'}`
-            : ''),
-      );
-    } catch (err) {
-      this.logger.error(
-        `💥 [${shortId}] extraction failed`,
-        err instanceof Error ? err.stack : String(err),
-      );
-      return this.safeFallback(question, traceId);
-    }
+      // Bound the prompt so an oversized question can't blow up token spend; history is already capped.
+      const boundedQuestion = trimmedQuestion.slice(0, MAX_QUESTION_CHARS);
 
-    // ── 2. Retrieve via the single tool — it routes internally (identity beats a co-mentioned
-    //       attribute) and returns either `patients` (identity) or `matches` (attribute). Wrapped so
-    //       a DB/SQL/embeddings failure degrades to the safe fallback instead of a 500. ──
-    try {
-      const retrieval = await findPatients(this.prisma, this.embeddings, extraction, group);
-
-      if (retrieval.matchCount === 0) {
+      // ── 1. Extract (the only LLM call). A malformed/failed extraction degrades to the safe
+      //       fallback rather than throwing a 500. ──
+      let extraction: Extraction;
+      // Captured here so every downstream result — matches, identity, OR a post-extraction fallback —
+      // reports the tokens this call already spent. The empty-question fallback above ran before this,
+      // so it correctly carries no usage.
+      let reqUsage: RequestUsage | undefined;
+      try {
+        trace.agent = 'find-patient';
+        const extractionResult = await this.findPatientAgent.extract(boundedQuestion, history, {
+          traceId,
+          cohort: group,
+        });
+        extraction = extractionResult.extraction;
+        trace.rawModelOutput = extractionResult.raw ?? null;
+        if (extractionResult.refused) {
+          // A structured-output refusal is the extractor's injection ceiling tripping — flag it.
+          trace.injectionDetected = true;
+          trace.severity = bump(trace.severity, 'medium');
+          this.logger.warn(`🛡️ [${shortId}] extractor refused / returned null → safe fallback`);
+        }
+        const usage = extractionResult.usage;
+        trace.usage = usage;
+        reqUsage = this.toRequestUsage(usage, this.findPatientAgent.model);
         this.logger.log(
-          `🚫 [${shortId}] find_patients → 0 matches (${elapsed()}ms total) → fallback`,
+          `🔎 [${shortId}] extracted ${JSON.stringify(extraction)} in ${elapsed()}ms` +
+            (usage
+              ? ` | tokens in/out/total: ${usage.inputTokens ?? '?'}/` +
+                `${usage.outputTokens ?? '?'}/${usage.totalTokens ?? '?'}`
+              : ''),
         );
+      } catch (err) {
+        this.logger.error(
+          `💥 [${shortId}] extraction failed`,
+          err instanceof Error ? err.stack : String(err),
+        );
+        trace.outcome = 'error';
+        trace.severity = bump(trace.severity, 'high');
+        trace.fallbackUsed = true;
+        return this.safeFallback(question, traceId);
+      }
+
+      // ── 2. Retrieve via the single tool — it routes internally (identity beats a co-mentioned
+      //       attribute) and returns either `patients` (identity) or `matches` (attribute). Wrapped so
+      //       a DB/SQL/embeddings failure degrades to the safe fallback instead of a 500. ──
+      try {
+        const retrieval = await findPatients(this.prisma, this.embeddings, extraction, group);
+
+        if (retrieval.matchCount === 0) {
+          this.logger.log(
+            `🚫 [${shortId}] find_patients → 0 matches (${elapsed()}ms total) → fallback`,
+          );
+          // If extraction refused, the cause was the injection — reflect that over a plain no-match.
+          trace.outcome = trace.injectionDetected ? 'injection_refused' : 'no_match';
+          trace.fallbackUsed = true;
+          return this.safeFallback(question, traceId, reqUsage);
+        }
+
+        if (retrieval.patients) {
+          this.logger.log(
+            `👤 [${shortId}] find_patients (identity) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
+          );
+          trace.retrievalPath = 'identity';
+          trace.recordsRetrieved = refsFromRetrieval(retrieval);
+          trace.resolvedPatientId = retrieval.patients[0]?.id ?? null;
+          trace.outcome = 'patients_found';
+          return this.buildIdentityResult(question, traceId, retrieval, reqUsage);
+        }
+
+        const description = describeSearch(retrieval.query);
+        this.logger.log(
+          `🩺 [${shortId}] find_patients (${description}) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
+        );
+        trace.retrievalPath = 'attribute';
+        trace.recordsRetrieved = refsFromRetrieval(retrieval);
+        trace.outcome = 'patients_found';
+        return this.buildAttributeResult(question, traceId, retrieval, description, reqUsage);
+      } catch (err) {
+        this.logger.error(
+          `💥 [${shortId}] retrieval failed`,
+          err instanceof Error ? err.stack : String(err),
+        );
+        // Retrieval failed AFTER extraction spent tokens — still report them.
+        trace.outcome = 'error';
+        trace.severity = bump(trace.severity, 'high');
+        trace.fallbackUsed = true;
         return this.safeFallback(question, traceId, reqUsage);
       }
-
-      if (retrieval.patients) {
-        this.logger.log(
-          `👤 [${shortId}] find_patients (identity) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
-        );
-        return this.buildIdentityResult(question, traceId, retrieval, reqUsage);
-      }
-
-      const description = describeSearch(retrieval.query);
-      this.logger.log(
-        `🩺 [${shortId}] find_patients (${description}) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
-      );
-      return this.buildAttributeResult(question, traceId, retrieval, description, reqUsage);
-    } catch (err) {
-      this.logger.error(
-        `💥 [${shortId}] retrieval failed`,
-        err instanceof Error ? err.stack : String(err),
-      );
-      // Retrieval failed AFTER extraction spent tokens — still report them.
-      return this.safeFallback(question, traceId, reqUsage);
+    } finally {
+      // Single persist for the FIND path — guaranteed to run on every return/throw above.
+      await this.requestLog.record(trace);
     }
   }
 
@@ -243,21 +300,28 @@ export class QaService {
     patientId: string,
     question: string,
     history: ChatTurn[],
-    ctx: { traceId: string; shortId: string; elapsed: () => number },
+    ctx: { traceId: string; shortId: string; elapsed: () => number; trace: RequestTrace },
   ): Promise<QaResult> {
-    const { traceId, shortId, elapsed } = ctx;
+    const { traceId, shortId, elapsed, trace } = ctx;
+    // The requested id is recorded up front for provenance — even if it's blocked below it's reset.
+    trace.resolvedPatientId = patientId;
     this.logger.log(
       `🏁 [${shortId}] qa answer — cohort ${group} — patient ${patientId} — ` +
         `"${question.slice(0, 120)}" (history: ${history?.length ?? 0} turn(s))`,
     );
-    if (!question) return this.safeFallback(question, traceId);
-    const boundedQuestion = question.slice(0, MAX_QUESTION_CHARS);
 
     // Assigned only once the model call returns, so it threads into the success result, the
     // not-answerable fallback, and the post-call catch — but stays undefined for the pre-call
     // fallbacks (empty question above, cohort-boundary block below), which spent no tokens.
     let reqUsage: RequestUsage | undefined;
     try {
+      if (!question) {
+        trace.outcome = 'no_match';
+        trace.fallbackUsed = true;
+        return this.safeFallback(question, traceId);
+      }
+      const boundedQuestion = question.slice(0, MAX_QUESTION_CHARS);
+
       // ── Cohort re-verification (the critical isolation defense): re-read THIS patient under the
       //    caller's group before anything else. ──
       const row = await this.prisma.patient.findFirst({
@@ -265,33 +329,53 @@ export class QaService {
         include: patientInclude,
       });
       if (!row) {
-        // Unknown id OR a patient in the OTHER cohort — both are blocked identically. High severity.
+        // Unknown id OR a patient in the OTHER cohort — both are blocked identically. High severity:
+        // this is THE cross-group event the eval queries (blocked + logged + safe fallback).
         this.logger.warn(
           `🛡️ [${shortId}] cohort boundary — patient ${patientId} not in cohort ${group} ` +
             `(unknown or cross-cohort) → blocked, safe fallback`,
         );
+        trace.outcome = 'cohort_violation';
+        trace.cohortViolation = true;
+        trace.severity = bump(trace.severity, 'high');
+        trace.fallbackUsed = true;
+        trace.resolvedPatientId = null; // nothing actually resolved under this cohort
         return this.safeFallback(question, traceId);
       }
 
       // ── Serialize the record + one grounded answer call. ──
+      trace.recordsRetrieved = [{ table: 'patient', id: row.id }];
+      trace.agent = 'answer-patient';
       const { context } = serializePatientForPrompt(toPatientDetail(row));
-      const { result, usage, refused } = await this.answerPatientAgent.answer(
+      const { result, usage, refused, raw } = await this.answerPatientAgent.answer(
         boundedQuestion,
         context,
         history,
+        { traceId, cohort: group },
       );
+      trace.usage = usage;
+      trace.rawModelOutput = raw ?? null;
+      trace.confidence = result.confidence ?? null;
       reqUsage = this.toRequestUsage(usage, this.answerPatientAgent.model);
       if (refused) {
+        // A structured-output refusal is the answerer's injection ceiling tripping — flag it.
+        trace.injectionDetected = true;
+        trace.severity = bump(trace.severity, 'medium');
         this.logger.warn(`🛡️ [${shortId}] answerer refused / unparseable → safe fallback`);
       }
       if (!result.answerable) {
         this.logger.log(
           `🚫 [${shortId}] not answerable from patient ${patientId}'s records (${elapsed()}ms) → fallback`,
         );
+        trace.outcome = trace.injectionDetected ? 'injection_refused' : 'not_answerable';
+        trace.fallbackUsed = true;
         return this.safeFallback(question, traceId, reqUsage);
       }
       // Normalize citations (strip stray brackets/space the model may add around labels).
       const citations = result.citations.map((c) => c.replace(/[[\]]/g, '').trim()).filter(Boolean);
+      trace.answer = result.answer;
+      trace.citations = citations;
+      trace.outcome = 'answered';
       this.logger.log(
         `💬 [${shortId}] answered patient ${patientId} — confidence ${result.confidence}, ` +
           `citations [${citations.join(', ')}] (${elapsed()}ms total)` +
@@ -316,7 +400,13 @@ export class QaService {
       );
       // `reqUsage` is set only if the generation call returned before throwing — so this reports
       // tokens on a post-generation failure but not on a re-fetch failure (which spent none).
+      trace.outcome = 'error';
+      trace.severity = bump(trace.severity, 'high');
+      trace.fallbackUsed = true;
       return this.safeFallback(question, traceId, reqUsage);
+    } finally {
+      // Single persist for the ANSWER path — guaranteed to run on every return/throw above.
+      await this.requestLog.record(trace);
     }
   }
 
