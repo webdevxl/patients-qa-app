@@ -2,8 +2,7 @@ services:
   db:
     # pgvector/pgvector:pg16 is the official postgres:16 image with the `vector`
     # extension preinstalled — required for the ICD-10 embedding similarity search
-    # (see backend/prisma/schema.prisma `IcdCode.embedding`). Same PG16 engine, so the
-    # existing data volume mounts unchanged; only the container is recreated.
+    # (see backend/prisma/schema.prisma `IcdCode.embedding`).
     image: pgvector/pgvector:pg16
     container_name: patients-qa-db
     restart: unless-stopped
@@ -12,9 +11,9 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: patients_qa
     ports:
-      # Host 5433 -> container 5432 to avoid clashing with other local Postgres
-      # instances already bound to 5432.
-      - "5433:5432"
+      # Bound to localhost only — the database must NOT be reachable from the
+      # internet. Host 5433 to avoid clashing with any local Postgres on 5432.
+      - "127.0.0.1:5433:5432"
     volumes:
       - patients_qa_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,6 +21,49 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  backend:
+    build: ./backend
+    container_name: patients-qa-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/patients_qa?schema=public"
+      PORT: "3000"
+      JWT_SECRET: "${JWT_SECRET}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Inlined into the web bundle at build time — must be the URL the
+        # browser (outside the server) can reach the backend on.
+        EXPO_PUBLIC_API_URL: "http://${PUBLIC_HOST}:3000"
+    container_name: patients-qa-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  admin:
+    build:
+      context: ./admin
+      args:
+        NEXT_PUBLIC_API_URL: "http://${PUBLIC_HOST}:3000"
+        NEXT_PUBLIC_ADMIN_USER: "${ADMIN_USER:-admin}"
+        NEXT_PUBLIC_ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
+    container_name: patients-qa-admin
+    restart: unless-stopped
+    ports:
+      - "3200:80"
+    depends_on:
+      - backend
 
 volumes:
   patients_qa_pgdata:
