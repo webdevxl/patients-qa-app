@@ -11,27 +11,106 @@ independently from the relational data.
 | `schema.sql` | DDL only: `vector` extension, all tables (incl. the `embedding` columns), indexes, foreign keys, Prisma migrations table. Begins with `DROP TABLE IF EXISTS …` so re-running is safe. | small |
 | `data.sql` | Row data for **every** table. `allergen` and `icd_code` are written with their `embedding` column **omitted** — those rows are seeded here without vectors. | small |
 | `embeddings.sql` | The `vector(1536)` payloads for `allergen.embedding` and `icd_code.embedding`. Loads into a temp table and `UPDATE`s the parent rows in place, so it's safe to run on a DB that already has the schema + data. | ~10 MB |
-| `install.sh` | Restore script. Reads `DATABASE_URL` from `../backend/.env` (overridable) and applies the three SQL files in order. | — |
+| `install.sh` | Restore script. Supports three modes (local psql, `docker exec`, `docker compose exec`). | — |
 | `dump.sh` | Regenerates the three SQL files from a running source database. Defaults to the local `patients-qa-db` docker container. | — |
 
-## Restoring on a server
+## Target requirements
 
-```bash
-# 1) Place this entire db-dump/ directory on the target machine.
-# 2) Ensure backend/.env exists alongside it (or pass --env <path>) and contains:
-#       DATABASE_URL="postgresql://user:pass@host:5432/dbname"
-# 3) Make sure the target Postgres is v16+ with pgvector available
-#    (pgvector/pgvector:pg16 works out of the box).
+Postgres **16+** with the `vector` extension available (e.g. the
+`pgvector/pgvector:pg16` image). The dump uses Postgres-16 `\restrict`
+meta-commands, so an older psql client will fail to parse it.
 
-./install.sh           # full restore (schema + data + embeddings)
-./install.sh -y        # skip the destructive-action confirmation
-./install.sh --skip-embeddings   # restore the relational data only
-./install.sh --env /path/to/.env # use a different .env file
+## Where to run the script from
+
+**Always invoke `install.sh` from inside the `db-dump/` directory** (i.e. with
+`./install.sh …`). The script uses absolute paths derived from its own
+location — *not* `$PWD` — so it can find the three SQL files and the sibling
+`backend/.env` and `docker-compose.yml`. Running it from elsewhere works too,
+but the defaults assume the standard layout:
+
+```
+project-root/
+├── backend/.env            ← DATABASE_URL for --mode local
+├── docker-compose.yml      ← used by default for --mode compose
+└── db-dump/                ← cd here and ./install.sh
+    ├── install.sh
+    ├── schema.sql
+    ├── data.sql
+    └── embeddings.sql
 ```
 
-The script aborts on the first SQL error (`psql -v ON_ERROR_STOP=1`) and wraps
-the schema and data files in single transactions, so a partial restore can't
-leave the DB in a half-broken state.
+## Restoring on a server (Docker / Docker Compose)
+
+The server doesn't need `psql` installed on the host — the script pipes each
+SQL file into the psql binary that already lives inside the DB container.
+Likewise, the `backend/.env` file is **not required** for `--docker` or
+`--compose` modes (the container connects via local socket).
+
+```bash
+# 1) Copy this db-dump/ directory onto the server (inside the project repo
+#    so docker-compose.yml is at ../docker-compose.yml).
+cd /opt/patients-qa-app/db-dump
+
+# 2) Bring up the DB container and wait for it to be healthy.
+docker compose -f ../docker-compose.yml up -d db
+docker compose -f ../docker-compose.yml ps
+
+# 3) Restore — pick one of:
+
+# (a) docker exec into the container by name (matches docker-compose.yml
+#     container_name: patients-qa-db).
+./install.sh --docker -y
+
+# (b) Or go through the compose project (no fixed container_name needed).
+#     --compose-file defaults to ../docker-compose.yml so you don't need to
+#     pass it explicitly when running from db-dump/.
+./install.sh --compose -y
+```
+
+`--yes` (or `-y`) skips the destructive-action confirmation. Drop it if you
+want to be prompted.
+
+In either docker-based mode the script:
+
+- checks the container/service is actually running before doing anything,
+- pipes the SQL files in over stdin (no need to mount or `docker cp` them),
+- applies `schema.sql` → `data.sql` → `embeddings.sql` in order,
+- aborts on the first SQL error (`-v ON_ERROR_STOP=1`),
+- wraps `schema.sql` and `data.sql` in single transactions so a partial restore
+  can't leave the DB half-broken (`embeddings.sql` has its own per-table
+  transactions),
+- prints a row-count sanity check at the end.
+
+### Pointing at a non-default container or service
+
+```bash
+./install.sh --docker --container my-pg --db-user app --db-name app_db -y
+
+./install.sh --compose --service postgres --compose-file ./infra/compose.yml \
+             --db-user postgres --db-name app_db -y
+```
+
+### Skipping embeddings
+
+If you want a fast schema + data restore for testing and intend to backfill
+embeddings later with the existing `embed-*-compute.ts` scripts:
+
+```bash
+./install.sh --docker -y --skip-embeddings
+```
+
+## Restoring on a dev laptop (host psql)
+
+```bash
+# Default — reads ../backend/.env for DATABASE_URL.
+./install.sh
+
+# Or point at a different .env:
+./install.sh --env /path/to/.env
+```
+
+Requires `psql` 16+ on the host. The `.env` file must define `DATABASE_URL`,
+e.g. `DATABASE_URL="postgresql://user:pass@host:5432/dbname"`.
 
 ## Regenerating the dump
 
