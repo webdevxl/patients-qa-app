@@ -44,15 +44,14 @@ const MAX_CONTENT_CHARS = 2000;
 export const CONTEXT_WINDOW_TOKENS = 100_000;
 
 /** Default chat model + sampling; overridable via ConfigService at the DI layer. */
-export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini';
+export const DEFAULT_CHAT_MODEL = 'gpt-5.4-mini-2026-03-17';
 export const DEFAULT_CHAT_TEMPERATURE = 0;
 
 // Client-side resilience so a slow/stalled OpenAI call fails FAST into the safe-fallback path
-// instead of inheriting the SDK's ~10-minute default and fanning out unbounded under load. Worst-
-// case wall time ≈ timeout × (1 + maxRetries), so keep retries low.
+// instead of inheriting the SDK's ~10-minute default. Worst-case wall time ≈ timeout ×
+// (1 + maxRetries), so keep retries low.
 const CHAT_TIMEOUT_MS = 15_000;
 const CHAT_MAX_RETRIES = 2;
-const CHAT_MAX_CONCURRENCY = 8;
 
 // ──────────────────────────── conversation history ───────────────────────────
 
@@ -227,6 +226,5 @@ export function createChatModel(options: ChatModelOptions = {}): ChatOpenAI {
     temperature: options.temperature ?? DEFAULT_CHAT_TEMPERATURE,
     timeout: CHAT_TIMEOUT_MS,
     maxRetries: CHAT_MAX_RETRIES,
-    maxConcurrency: CHAT_MAX_CONCURRENCY,
   });
 }

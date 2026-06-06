@@ -173,15 +173,14 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
     setActivePatient(patient);
     setMode('patient');
     setDetailPatient(null);
+    // UI-only brief — deliberately untagged (no agentName/contextSummary) so it never enters
+    // history. The answerer's patient anchor is the records block (re-sent in full on every
+    // request, and they name the patient) plus the real Q&A turns; a boundary turn would only
+    // duplicate that and leak the internal patient id.
     append({
       id: nextId(),
       role: 'assistant',
       text: buildPatientBrief(patient),
-      // Goes into history so the answerer has context for "what about his allergies?" follow-ups.
-      // This is the determination moment — the first answer-phase turn for this patient.
-      agentName: 'answer-patient',
-      patientId: patient.id,
-      contextSummary: `Now answering about ${fullName(patient)} (id ${patient.id}).`,
     });
     scrollToEnd();
   };
@@ -191,8 +190,8 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
     // A patient is already pinned — ignore further picks so the chat stays scoped to that one.
     // (The card's Ask button is disabled in this state; this is just defense in depth.)
     if (activePatient) return;
-    // The candidate echo is a find-phase selection action — the answerer doesn't need it (it has the
-    // records + the "Now answering about X" boundary turn).
+    // The candidate echo is a find-phase selection action — the answerer doesn't need it (it has
+    // the full records, which name the patient, re-sent on every request).
     append({ id: nextId(), role: 'user', text: fullName(item.patient), agentName: 'find-patient' });
     selectPatient(item.patient);
   };
