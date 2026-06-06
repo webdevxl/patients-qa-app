@@ -26,10 +26,11 @@ export interface ChatTurn {
   content: string;
 }
 
-/** Keep at most this many prior turns (history is for coreference, not full recall). */
-const MAX_HISTORY_TURNS = 6;
+/** Keep at most this many prior turns — generous so the agent has the full conversation context,
+ *  while still bounding token spend + injection surface on a long chat. */
+const MAX_HISTORY_TURNS = 20;
 /** Cap any single turn's content to bound tokens + injection surface. */
-const MAX_CONTENT_CHARS = 500;
+const MAX_CONTENT_CHARS = 2000;
 
 /**
  * Harden client-supplied history before it reaches any model:

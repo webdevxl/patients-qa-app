@@ -164,9 +164,33 @@ const joinMeta = (parts: (string | null | undefined)[]): string =>
   parts.filter((p) => p != null && p !== '').join(' · ');
 
 /**
+ * Compact one-line rendering of the patient's JSON `legalMailingAddress` blob. An object becomes
+ * "k: v, k: v" (skipping null/empty values); a plain string passes through; anything else is
+ * stringified. Returns null when there's nothing to show, so the demographics filter drops it.
+ */
+function addressText(addr: unknown): string | null {
+  if (addr == null) return null;
+  if (typeof addr === 'string') return addr.trim() || null;
+  if (typeof addr === 'object') {
+    const parts = Object.entries(addr as Record<string, unknown>)
+      .filter(([, v]) => v != null && v !== '')
+      .map(([k, v]) => `${k}: ${String(v)}`);
+    return parts.length ? parts.join(', ') : null;
+  }
+  return String(addr);
+}
+
+/**
  * Flatten a `PatientDetail` into a delimited, label-anchored text block the model answers from.
  * Each child record gets a stable bracketed label ([C1], [M2], [A1], [O3]) so the model can cite
  * exactly what it used. Returns the block plus the list of valid labels (for logging / validation).
+ *
+ * Renders the WHOLE record so the answerer never lacks a field the clinician might ask about:
+ * demographics (incl. location, contact, mailing address, leave/death) and every condition,
+ * medication, allergy and observation with their clinical fields. Conditions and medications also
+ * carry their audit trail (`createdBy`/`createdTime`/`revBy`/`revTime`) — `created_by`/`rev_by` are
+ * the recording/revising clinician's name, which the user wants answerable. Null/empty fields drop
+ * out via `joinMeta` + the demographics filter.
  */
 export function serializePatientForPrompt(p: PatientDetail): {
   context: string;
@@ -176,6 +200,7 @@ export function serializePatientForPrompt(p: PatientDetail): {
   const yrs = age(p.dob);
   const labels: string[] = [];
 
+  const addr = addressText(p.legalMailingAddress);
   const demographics = [
     `Name: ${name}`,
     `DOB: ${d(p.dob)}${yrs != null ? ` (age ${yrs})` : ''}`,
@@ -184,13 +209,23 @@ export function serializePatientForPrompt(p: PatientDetail): {
       p.ethnicityDescription ? `Ethnicity: ${p.ethnicityDescription}` : null,
       p.status ? `Status: ${p.status}` : null,
       p.outpatient == null ? null : p.outpatient ? 'Care: Outpatient' : 'Care: Inpatient',
+      p.onLeave ? 'On leave: yes' : null,
     ]),
     joinMeta([
       p.admissionTime ? `Admitted: ${p.admissionTime}` : null,
       p.dischargeTime ? `Discharged: ${p.dischargeTime}` : null,
+      p.deathTime ? `Deceased: ${p.deathTime}` : null,
     ]),
+    joinMeta([
+      p.unitDescription ? `Unit: ${p.unitDescription}` : null,
+      p.floorDescription ? `Floor: ${p.floorDescription}` : null,
+      p.roomDescription ? `Room: ${p.roomDescription}` : null,
+      p.bedDescription ? `Bed: ${p.bedDescription}` : null,
+    ]),
+    joinMeta([p.email ? `Email: ${p.email}` : null, p.phone ? `Phone: ${p.phone}` : null]),
+    addr ? `Address: ${addr}` : null,
   ]
-    .filter((line) => line && !line.endsWith(': ') && line !== '')
+    .filter((line): line is string => !!line && !line.endsWith(': ') && line !== '')
     .join('\n');
 
   const conditions = p.conditions.map((c, i) => {
@@ -203,6 +238,10 @@ export function serializePatientForPrompt(p: PatientDetail): {
       c.isPrimaryDiagnosis ? 'primary diagnosis' : null,
       c.onsetDate ? `onset ${c.onsetDate}` : null,
       c.resolvedDate ? `resolved ${c.resolvedDate}` : null,
+      c.createdBy ? `created by ${c.createdBy}` : null,
+      c.createdTime ? `created ${c.createdTime}` : null,
+      c.revBy ? `rev by ${c.revBy}` : null,
+      c.revTime ? `rev ${c.revTime}` : null,
     ])}`;
   });
 
@@ -217,7 +256,11 @@ export function serializePatientForPrompt(p: PatientDetail): {
       m.status ? `status: ${m.status}` : null,
       m.directions ? `directions: ${m.directions}` : null,
       m.narcotic ? 'narcotic' : null,
+      m.rxNormId ? `RxNorm ${m.rxNormId}` : null,
       m.startTime ? `started ${m.startTime}` : null,
+      m.orderTime ? `ordered ${m.orderTime}` : null,
+      m.createdTime ? `created ${m.createdTime}` : null,
+      m.revTime ? `rev ${m.revTime}` : null,
     ])}`;
   });
 
@@ -226,12 +269,14 @@ export function serializePatientForPrompt(p: PatientDetail): {
     labels.push(label);
     return `[${label}] ${a.allergen ?? 'Allergen'} | ${joinMeta([
       a.category ? `category: ${a.category}` : null,
+      a.type ? `type: ${a.type}` : null,
       a.severity ? `severity: ${a.severity}` : null,
       a.reactionType ? `reaction: ${a.reactionType}` : null,
       a.reactionSubType ? `(${a.reactionSubType})` : null,
       a.clinicalStatus ? `status: ${a.clinicalStatus}` : null,
       a.reactionNote ? `note: ${a.reactionNote}` : null,
       a.onsetDate ? `onset ${a.onsetDate}` : null,
+      a.resolvedDate ? `resolved ${a.resolvedDate}` : null,
     ])}`;
   });
 
@@ -241,6 +286,7 @@ export function serializePatientForPrompt(p: PatientDetail): {
     return `[${label}] ${observationText(o.data)} | ${joinMeta([
       o.recordedTime ? `recorded ${o.recordedTime}` : null,
       o.method ? `method: ${o.method}` : null,
+      o.recordedBy ? `by ${o.recordedBy}` : null,
     ])}`;
   });
 
