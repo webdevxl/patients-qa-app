@@ -1,7 +1,7 @@
 // Thin, typed HTTP client for the Nest backend — mirrors the pattern in
 // frontend/src/api/client.ts. Base URL resolves from NEXT_PUBLIC_API_URL (Next inlines
 // NEXT_PUBLIC_* at build time) and falls back to the backend's default dev port.
-import type { CohortGroup, RequestLog } from "./types";
+import type { CohortGroup, RequestLog, VariantMetrics } from "./types";
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
@@ -42,6 +42,7 @@ export async function mintToken(group: CohortGroup): Promise<string> {
 export interface LogFilters {
   outcome?: string;
   group?: string;
+  variant?: string;
   agent?: string;
   cohortViolation?: boolean;
   limit?: number;
@@ -58,6 +59,7 @@ export async function fetchLogs(
   const params = new URLSearchParams();
   if (filters.outcome) params.set("outcome", filters.outcome);
   if (filters.group) params.set("group", filters.group);
+  if (filters.variant) params.set("variant", filters.variant);
   if (filters.agent) params.set("agent", filters.agent);
   if (filters.cohortViolation !== undefined) {
     params.set("cohortViolation", String(filters.cohortViolation));
@@ -79,4 +81,26 @@ export async function fetchLogs(
     throw new ApiError(`Failed to load logs (${res.status})`, res.status);
   }
   return (await res.json()) as RequestLog[];
+}
+
+/**
+ * Fetch per-variant A/B experiment metrics (`GET /qa/metrics`) — one aggregate row per arm,
+ * computed by the backend straight from the audit log. Drives the A/B summary card.
+ */
+export async function fetchMetrics(token: string): Promise<VariantMetrics[]> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}/qa/metrics`, {
+      headers: { Authorization: `Basic ${token}` },
+    });
+  } catch {
+    throw new ApiError(`Cannot reach the backend at ${API_BASE_URL}. Is it running?`);
+  }
+  if (res.status === 401) {
+    throw new ApiError("Session expired — please sign in again.", 401);
+  }
+  if (!res.ok) {
+    throw new ApiError(`Failed to load metrics (${res.status})`, res.status);
+  }
+  return (await res.json()) as VariantMetrics[];
 }

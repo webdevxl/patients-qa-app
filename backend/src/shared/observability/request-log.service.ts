@@ -5,6 +5,7 @@ import type { ChatTurn, TokenUsage } from '../../agents/agent-base';
 import type { AnswerConfidence } from '../../agents/answer-patient.agent';
 import type { FindPatientsResult } from '../../agents/tools/find-patients.tool';
 import type { CohortGroup } from '../security/cohort.types';
+import { AGENT_VARIANTS, type AgentVariant } from '../security/variant.types';
 
 /**
  * Observability for the Q&A pipeline. One {@link RequestTrace} is assembled per request inside
@@ -46,6 +47,7 @@ export interface RequestTrace {
   traceId: string;
   startedAt: number; // ms epoch; durationMs is computed at persist time
   group: CohortGroup;
+  variant: AgentVariant; // A/B arm this request was routed to ('structured' | 'tool_calling')
   agent: string | null; // 'find-patient' | 'answer-patient' | null (no model call ran)
   question: string;
   history: ChatTurn[];
@@ -90,6 +92,7 @@ export function newTrace(seed: {
   traceId: string;
   startedAt: number;
   group: CohortGroup;
+  variant: AgentVariant;
   question: string;
   history: ChatTurn[];
 }): RequestTrace {
@@ -169,6 +172,7 @@ export class RequestLogService {
         data: {
           traceId: trace.traceId,
           group: trace.group,
+          variant: trace.variant,
           agent: trace.agent,
           question: trace.question,
           history: trace.history as unknown as Prisma.InputJsonValue,
@@ -209,12 +213,14 @@ export class RequestLogService {
     outcome?: string;
     cohortViolation?: boolean;
     group?: string;
+    variant?: string;
     agent?: string;
     limit: number;
   }) {
     const where: Prisma.RequestLogWhereInput = {};
     if (opts.outcome) where.outcome = opts.outcome;
     if (opts.group) where.group = opts.group;
+    if (opts.variant) where.variant = opts.variant;
     if (opts.agent) where.agent = opts.agent;
     if (opts.cohortViolation !== undefined) where.cohortViolation = opts.cohortViolation;
     return this.prisma.requestLog.findMany({
@@ -223,4 +229,73 @@ export class RequestLogService {
       take: opts.limit,
     });
   }
+
+  /**
+   * Per-variant experiment metrics for `GET /qa/metrics` — the A/B test's "basic experiment metrics
+   * per variant" (task §4). One pass per arm: counts the rows, the outcome/confidence distributions,
+   * the safety flags, and averages the token + latency columns straight from the audit log (the
+   * system of record), so the numbers are exactly what was logged — no separate metrics store to
+   * drift. Empty arms report zeros rather than being omitted, so the comparison always has both rows.
+   */
+  async metricsByVariant(): Promise<VariantMetrics[]> {
+    return Promise.all(AGENT_VARIANTS.map((variant) => this.metricsForVariant(variant)));
+  }
+
+  private async metricsForVariant(variant: AgentVariant): Promise<VariantMetrics> {
+    const where: Prisma.RequestLogWhereInput = { variant };
+
+    const [total, byOutcome, byConfidence, fallbacks, injections, violations, agg] =
+      await Promise.all([
+        this.prisma.requestLog.count({ where }),
+        this.prisma.requestLog.groupBy({ by: ['outcome'], where, _count: { _all: true } }),
+        this.prisma.requestLog.groupBy({
+          by: ['confidence'],
+          where: { ...where, confidence: { not: null } },
+          _count: { _all: true },
+        }),
+        this.prisma.requestLog.count({ where: { ...where, fallbackUsed: true } }),
+        this.prisma.requestLog.count({ where: { ...where, injectionDetected: true } }),
+        this.prisma.requestLog.count({ where: { ...where, cohortViolation: true } }),
+        this.prisma.requestLog.aggregate({
+          where,
+          _avg: { inputTokens: true, outputTokens: true, totalTokens: true, durationMs: true },
+        }),
+      ]);
+
+    const toMap = (rows: { _count: { _all: number } }[], key: (r: any) => string): Record<string, number> =>
+      Object.fromEntries(rows.map((r) => [key(r), r._count._all]));
+
+    const round = (n: number | null): number | null => (n == null ? null : Math.round(n));
+
+    return {
+      variant,
+      total,
+      outcomes: toMap(byOutcome, (r) => r.outcome),
+      confidence: toMap(byConfidence, (r) => r.confidence ?? 'null'),
+      fallbackUsed: fallbacks,
+      injectionDetected: injections,
+      cohortViolation: violations,
+      avgInputTokens: round(agg._avg.inputTokens),
+      avgOutputTokens: round(agg._avg.outputTokens),
+      avgTotalTokens: round(agg._avg.totalTokens),
+      avgDurationMs: round(agg._avg.durationMs),
+    };
+  }
+}
+
+/** One arm's aggregated experiment metrics (shape returned by `GET /qa/metrics`). */
+export interface VariantMetrics {
+  variant: AgentVariant;
+  total: number;
+  /** Count by `outcome` (answered / patients_found / no_match / cohort_violation / …). */
+  outcomes: Record<string, number>;
+  /** Count by answer `confidence` (High / Medium / Low) over rows that produced one. */
+  confidence: Record<string, number>;
+  fallbackUsed: number;
+  injectionDetected: number;
+  cohortViolation: number;
+  avgInputTokens: number | null;
+  avgOutputTokens: number | null;
+  avgTotalTokens: number | null;
+  avgDurationMs: number | null;
 }

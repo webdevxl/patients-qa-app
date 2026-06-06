@@ -2,6 +2,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import type { OnGuardVerdict } from '../shared/security/injection-guard.middleware';
+import type { AgentVariant } from '../shared/security/variant.types';
 
 /**
  * Shared base for the two Q&A agents (`find-patient.agent.ts` and `answer-patient.agent.ts`):
@@ -151,6 +152,29 @@ export function readUsage(raw: BaseMessage): TokenUsage | undefined {
 }
 
 /**
+ * Sum token usage across ALL messages in an agent's final state — the tool-calling variants make
+ * SEVERAL model calls (decide-to-call-tool, then answer), each carrying its own `usage_metadata`, so
+ * the single-call {@link readUsage} on the last message would under-report. Non-AI messages (human,
+ * tool) carry no usage and are skipped. Returns undefined when no message carried any usage.
+ */
+export function sumUsage(messages: BaseMessage[] | undefined): TokenUsage | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  let input = 0;
+  let output = 0;
+  let total = 0;
+  let found = false;
+  for (const msg of messages) {
+    const usage = readUsage(msg);
+    if (!usage) continue;
+    found = true;
+    input += usage.inputTokens ?? 0;
+    output += usage.outputTokens ?? 0;
+    total += usage.totalTokens ?? 0;
+  }
+  return found ? { inputTokens: input, outputTokens: output, totalTokens: total } : undefined;
+}
+
+/**
  * Best-effort RAW model output for the audit log. Under OpenAI strict structured-outputs the textual
  * `content` is usually empty and the structured payload rides in the tool call, so fall back to the
  * first tool call's args. Returns undefined when nothing usable is present (no model call / refusal
@@ -194,6 +218,13 @@ export interface TraceContext {
    * callback still fires with an `allow` verdict so the audit log records the decision.
    */
   onGuardVerdict?: OnGuardVerdict;
+  /**
+   * The A/B experiment arm ('structured' | 'tool_calling') this request was routed to. Purely
+   * observability: forwarded to LangSmith as a `variant:<arm>` tag + metadata key (see
+   * {@link buildRunConfig}) so the two arms' runs are filterable/comparable there, mirroring the
+   * `variant` column the audit log records. Never changes routing or output.
+   */
+  variant?: AgentVariant;
 }
 
 /**
@@ -205,6 +236,7 @@ export interface TraceContext {
 export function buildRunConfig(agentName: string, ctx?: TraceContext): RunnableConfig {
   const tags = ['patients-qa', `agent:${agentName}`];
   if (ctx?.cohort) tags.push(`cohort:${ctx.cohort}`);
+  if (ctx?.variant) tags.push(`variant:${ctx.variant}`);
   return {
     runName: agentName,
     tags,
@@ -212,6 +244,8 @@ export function buildRunConfig(agentName: string, ctx?: TraceContext): RunnableC
       agent: agentName,
       ...(ctx?.traceId ? { traceId: ctx.traceId } : {}),
       ...(ctx?.cohort ? { cohort: ctx.cohort } : {}),
+      // The A/B arm, so the two variants' runs are filterable/comparable in LangSmith.
+      ...(ctx?.variant ? { variant: ctx.variant } : {}),
       // `session_id` is one of LangSmith's recognized thread keys. Set it on EVERY run (LangChain
       // propagates parent metadata to the child model run, satisfying LangSmith's "all child runs"
       // requirement) so the whole conversation groups into one thread rather than scattered traces.

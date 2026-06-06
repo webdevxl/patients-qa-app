@@ -3,14 +3,15 @@
 import * as React from "react";
 import { LogOut, RefreshCw } from "lucide-react";
 
-import { ApiError, fetchLogs } from "@/lib/api";
+import { ApiError, fetchLogs, fetchMetrics } from "@/lib/api";
 import { clearSession, type AdminSession } from "@/lib/auth";
-import type { RequestLog } from "@/lib/types";
+import type { RequestLog, VariantMetrics } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LogsTable } from "./logs-table";
 import { LogDetailSheet } from "./log-detail-sheet";
+import { MetricsSummary } from "./metrics-summary";
 
 export function LogsView({
   session,
@@ -20,6 +21,7 @@ export function LogsView({
   onSignOut: () => void;
 }) {
   const [logs, setLogs] = React.useState<RequestLog[]>([]);
+  const [metrics, setMetrics] = React.useState<VariantMetrics[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [selected, setSelected] = React.useState<RequestLog | null>(null);
@@ -29,8 +31,13 @@ export function LogsView({
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchLogs(session.token, { limit: 500 });
+      // The A/B metrics are a best-effort header — never let them block the log table.
+      const [data, metricsData] = await Promise.all([
+        fetchLogs(session.token, { limit: 500 }),
+        fetchMetrics(session.token).catch(() => [] as VariantMetrics[]),
+      ]);
       setLogs(data);
+      setMetrics(metricsData);
     } catch (err) {
       // An expired/invalid token means the gate must re-authenticate.
       if (err instanceof ApiError && err.status === 401) {
@@ -96,7 +103,10 @@ export function LogsView({
           ))}
         </div>
       ) : (
-        <LogsTable data={logs} onRowClick={openLog} />
+        <>
+          <MetricsSummary metrics={metrics} />
+          <LogsTable data={logs} onRowClick={openLog} />
+        </>
       )}
 
       <LogDetailSheet log={selected} open={sheetOpen} onOpenChange={setSheetOpen} />

@@ -18,6 +18,7 @@ import {
   GroupBadge,
   OutcomeBadge,
   SeverityBadge,
+  VariantBadge,
 } from "./status-badges";
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -95,6 +96,7 @@ export function LogDetailSheet({
                 <OutcomeBadge value={log.outcome} />
                 <SeverityBadge value={log.severity} />
                 <GroupBadge value={log.group} />
+                <VariantBadge value={log.variant} />
                 {log.agent && <Mono>{log.agent}</Mono>}
               </div>
               <SheetTitle className="pr-8 text-base leading-snug">

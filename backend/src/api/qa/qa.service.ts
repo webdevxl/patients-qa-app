@@ -20,18 +20,17 @@ import {
   type RequestTrace,
 } from '../../shared/observability/request-log.service';
 import {
-  FIND_PATIENT_AGENT,
-  type FindPatientAgent,
-  type Extraction,
-} from '../../agents/find-patient.agent';
+  FIND_PATIENT_RESOLVERS,
+  type FindPatientResolvers,
+  type FindResolution,
+} from '../../agents/find-resolver';
 import {
-  ANSWER_PATIENT_AGENT,
+  ANSWER_PATIENT_AGENTS,
   serializePatientForPrompt,
-  type AnswerPatientAgent,
+  type AnswerPatientAgents,
   type AnswerConfidence,
 } from '../../agents/answer-patient.agent';
 import {
-  findPatients,
   patientInclude,
   toPatientDetail,
   type FindPatientsResult,
@@ -39,6 +38,7 @@ import {
   type ConditionMatch,
 } from '../../agents/tools/find-patients.tool';
 import type { CohortGroup } from '../../shared/security/cohort.types';
+import type { AgentVariant } from '../../shared/security/variant.types';
 import {
   INJECTION_GUARD_CLASSIFIER,
   type InjectionGuardClassifier,
@@ -147,8 +147,10 @@ export class QaService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly embeddings: EmbeddingsService,
-    @Inject(FIND_PATIENT_AGENT) private readonly findPatientAgent: FindPatientAgent,
-    @Inject(ANSWER_PATIENT_AGENT) private readonly answerPatientAgent: AnswerPatientAgent,
+    // Both A/B arms of each model stage, keyed by variant — the request's session variant selects
+    // which one runs. Both arms enforce the identical cohort/injection defenses.
+    @Inject(FIND_PATIENT_RESOLVERS) private readonly findResolvers: FindPatientResolvers,
+    @Inject(ANSWER_PATIENT_AGENTS) private readonly answerAgents: AnswerPatientAgents,
     @Inject(INJECTION_GUARD_CLASSIFIER) private readonly injectionGuard: InjectionGuardClassifier,
     private readonly requestLog: RequestLogService,
   ) {}
@@ -200,6 +202,7 @@ export class QaService {
    */
   async query(
     group: CohortGroup,
+    variant: AgentVariant,
     question: string,
     history: ChatTurn[] = [],
     patientId?: string,
@@ -220,6 +223,7 @@ export class QaService {
       traceId,
       startedAt,
       group,
+      variant,
       question: trimmedQuestion,
       history: sanitizeAndTrim(history),
     });
@@ -229,7 +233,7 @@ export class QaService {
     //    text. Branch BEFORE extraction — there is no search to run here. The SAME trace is handed
     //    off; answerAboutPatient owns the persist, so this request logs exactly once. ──
     if (patientId) {
-      return this.answerAboutPatient(group, patientId, trimmedQuestion, history, {
+      return this.answerAboutPatient(group, variant, patientId, trimmedQuestion, history, {
         traceId,
         shortId,
         elapsed,
@@ -267,45 +271,28 @@ export class QaService {
         return this.safeFallback(question, traceId);
       }
 
-      // ── 1. Extract (the only LLM call). A malformed/failed extraction degrades to the safe
-      //       fallback rather than throwing a 500. ──
-      let extraction: Extraction;
-      // Captured here so every downstream result — matches, identity, OR a post-extraction fallback —
-      // reports the tokens this call already spent. The empty-question fallback above ran before this,
-      // so it correctly carries no usage.
+      // ── 1. Resolve the FIND stage via the session's A/B arm. Both arms return the SAME
+      //       FindPatientsResult — the 'structured' arm extracts search params then routes the
+      //       retrieval in code; the 'tool_calling' arm lets the LLM drive the `find_patients` tool.
+      //       Cohort scoping is identical (the retrieval is confined to `group` either way). A
+      //       failure in EITHER step degrades to the safe fallback rather than throwing a 500. ──
+      const resolver = this.findResolvers[variant];
+      // Captured so every downstream result — matches, identity, OR a post-resolve fallback — reports
+      // the tokens this call already spent. The empty-question fallback above ran before this, so it
+      // correctly carries no usage.
       let reqUsage: RequestUsage | undefined;
+      let resolution: FindResolution;
       try {
         trace.agent = 'find-patient';
-        const extractionResult = await this.findPatientAgent.extract(boundedQuestion, history, {
+        resolution = await resolver.resolve(boundedQuestion, history, group, {
           traceId,
           cohort: group,
           sessionId,
+          variant,
         });
-        extraction = extractionResult.extraction;
-        trace.rawModelOutput = extractionResult.raw ?? null;
-        // Audit-log + client-facing rationale for the search params. null on EMPTY_EXTRACTION /
-        // refusal, since the model never wrote one. Threaded into every downstream find-path return
-        // (success + post-extraction fallback) so the admin Sheet and the chat disclosure see it.
-        trace.extractionReasoning = extraction.reasoning;
-        if (extractionResult.refused) {
-          // A structured-output refusal is the extractor's injection ceiling tripping — flag it.
-          trace.injectionDetected = true;
-          trace.severity = bump(trace.severity, 'medium');
-          this.logger.warn(`🛡️ [${shortId}] extractor refused / returned null → safe fallback`);
-        }
-        const usage = extractionResult.usage;
-        trace.usage = usage;
-        reqUsage = this.toRequestUsage(usage, this.findPatientAgent.model);
-        this.logger.log(
-          `🔎 [${shortId}] extracted ${JSON.stringify(extraction)} in ${elapsed()}ms` +
-            (usage
-              ? ` | tokens in/out/total: ${usage.inputTokens ?? '?'}/` +
-                `${usage.outputTokens ?? '?'}/${usage.totalTokens ?? '?'}`
-              : ''),
-        );
       } catch (err) {
         this.logger.error(
-          `💥 [${shortId}] extraction failed`,
+          `💥 [${shortId}] find resolve failed`,
           err instanceof Error ? err.stack : String(err),
         );
         trace.outcome = 'error';
@@ -314,74 +301,66 @@ export class QaService {
         return this.safeFallback(question, traceId);
       }
 
-      // ── 2. Retrieve via the single tool — it routes internally (identity beats a co-mentioned
-      //       attribute) and returns either `patients` (identity) or `matches` (attribute). Wrapped so
-      //       a DB/SQL/embeddings failure degrades to the safe fallback instead of a 500. ──
-      try {
-        const retrieval = await findPatients(this.prisma, this.embeddings, extraction, group);
+      // ── 2. Shape the result. Pure code (no model/DB calls) → cannot throw. ──
+      const retrieval = resolution.retrieval;
+      trace.rawModelOutput = resolution.raw ?? null;
+      // Audit-log + client-facing rationale for the search params (the structured arm writes one; the
+      // tool arm has none → null). Threaded into every downstream find-path return.
+      trace.extractionReasoning = resolution.reasoning ?? null;
+      const extractionReasoning = resolution.reasoning ?? undefined;
+      if (resolution.refused) {
+        // A structured-output refusal is the extractor's injection ceiling tripping — flag it.
+        trace.injectionDetected = true;
+        trace.severity = bump(trace.severity, 'medium');
+        this.logger.warn(`🛡️ [${shortId}] find resolver refused / returned nothing → safe fallback`);
+      }
+      const usage = resolution.usage;
+      trace.usage = usage;
+      reqUsage = this.toRequestUsage(usage, resolver.model);
+      this.logger.log(
+        `🔎 [${shortId}] resolved (${variant}) → matchCount=${retrieval.matchCount} in ${elapsed()}ms` +
+          (usage
+            ? ` | tokens in/out/total: ${usage.inputTokens ?? '?'}/` +
+              `${usage.outputTokens ?? '?'}/${usage.totalTokens ?? '?'}`
+            : ''),
+      );
 
-        // Stable across every post-extraction return below. Null on EMPTY_EXTRACTION → undefined on
-        // the wire (the client field is optional, not nullable).
-        const extractionReasoning = extraction.reasoning ?? undefined;
-
-        if (retrieval.matchCount === 0) {
-          this.logger.log(
-            `🚫 [${shortId}] find_patients → 0 matches (${elapsed()}ms total) → fallback`,
-          );
-          // If extraction refused, the cause was the injection — reflect that over a plain no-match.
-          trace.outcome = trace.injectionDetected ? 'injection_refused' : 'no_match';
-          trace.fallbackUsed = true;
-          return this.safeFallback(question, traceId, reqUsage, FIND_PATIENT_FALLBACK, {
-            extractionReasoning,
-          });
-        }
-
-        if (retrieval.patients) {
-          this.logger.log(
-            `👤 [${shortId}] find_patients (identity) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
-          );
-          trace.retrievalPath = 'identity';
-          trace.recordsRetrieved = refsFromRetrieval(retrieval);
-          trace.resolvedPatientId = retrieval.patients[0]?.id ?? null;
-          trace.outcome = 'patients_found';
-          return this.buildIdentityResult(
-            question,
-            traceId,
-            retrieval,
-            reqUsage,
-            extractionReasoning,
-          );
-        }
-
-        const description = describeSearch(retrieval.query);
-        this.logger.log(
-          `🩺 [${shortId}] find_patients (${description}) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
-        );
-        trace.retrievalPath = 'attribute';
-        trace.recordsRetrieved = refsFromRetrieval(retrieval);
-        trace.outcome = 'patients_found';
-        return this.buildAttributeResult(
-          question,
-          traceId,
-          retrieval,
-          description,
-          reqUsage,
-          extractionReasoning,
-        );
-      } catch (err) {
-        this.logger.error(
-          `💥 [${shortId}] retrieval failed`,
-          err instanceof Error ? err.stack : String(err),
-        );
-        // Retrieval failed AFTER extraction spent tokens — still report them. Carry the extraction
-        // reasoning too: the model DID write one even though we can't show the matches.
-        trace.outcome = 'error';
-        trace.severity = bump(trace.severity, 'high');
+      if (retrieval.matchCount === 0) {
+        this.logger.log(`🚫 [${shortId}] find → 0 matches (${elapsed()}ms total) → fallback`);
+        // If the resolver refused, the cause was the injection — reflect that over a plain no-match.
+        trace.outcome = trace.injectionDetected ? 'injection_refused' : 'no_match';
         trace.fallbackUsed = true;
         return this.safeFallback(question, traceId, reqUsage, FIND_PATIENT_FALLBACK, {
-          extractionReasoning: extraction.reasoning ?? undefined,
+          extractionReasoning,
         });
       }
+
+      if (retrieval.patients) {
+        this.logger.log(
+          `👤 [${shortId}] find (identity) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
+        );
+        trace.retrievalPath = 'identity';
+        trace.recordsRetrieved = refsFromRetrieval(retrieval);
+        trace.resolvedPatientId = retrieval.patients[0]?.id ?? null;
+        trace.outcome = 'patients_found';
+        return this.buildIdentityResult(question, traceId, retrieval, reqUsage, extractionReasoning);
+      }
+
+      const description = describeSearch(retrieval.query);
+      this.logger.log(
+        `🩺 [${shortId}] find (${description}) → matchCount=${retrieval.matchCount} (${elapsed()}ms total)`,
+      );
+      trace.retrievalPath = 'attribute';
+      trace.recordsRetrieved = refsFromRetrieval(retrieval);
+      trace.outcome = 'patients_found';
+      return this.buildAttributeResult(
+        question,
+        traceId,
+        retrieval,
+        description,
+        reqUsage,
+        extractionReasoning,
+      );
     } finally {
       // Single persist for the FIND path — guaranteed to run on every return/throw above.
       await this.requestLog.record(trace);
@@ -399,6 +378,7 @@ export class QaService {
    */
   private async answerAboutPatient(
     group: CohortGroup,
+    variant: AgentVariant,
     patientId: string,
     question: string,
     history: ChatTurn[],
@@ -473,21 +453,26 @@ export class QaService {
           );
         }
       };
+      // Select the answer agent for this request's A/B arm. Both arms enforce the SAME injection
+      // guard + see only this one cohort-verified patient — the tool-calling arm just pulls the
+      // record via a tool instead of receiving it inline.
+      const answerAgent = this.answerAgents[variant];
       // Stream tokens only when a sink was supplied (/qa/stream) — and only HERE, after the cohort
       // re-verify above has passed, so a blocked/unknown id never streams a single token. Both calls
       // return the identical PatientAnswerResult; everything downstream is unchanged.
       const { result, usage, refused, raw } = onToken
-        ? await this.answerPatientAgent.answerStreaming(
+        ? await answerAgent.answerStreaming(
             boundedQuestion,
             context,
             answerHistory,
-            { traceId, cohort: group, sessionId, onGuardVerdict },
+            { traceId, cohort: group, sessionId, variant, onGuardVerdict },
             onToken,
           )
-        : await this.answerPatientAgent.answer(boundedQuestion, context, answerHistory, {
+        : await answerAgent.answer(boundedQuestion, context, answerHistory, {
             traceId,
             cohort: group,
             sessionId,
+            variant,
             onGuardVerdict,
           });
       trace.usage = usage;
@@ -498,7 +483,7 @@ export class QaService {
       // is optional).
       const answerReasoning = result.reasoning?.trim() ? result.reasoning : null;
       trace.answerReasoning = answerReasoning;
-      reqUsage = this.toRequestUsage(usage, this.answerPatientAgent.model);
+      reqUsage = this.toRequestUsage(usage, answerAgent.model);
       if (refused) {
         // A structured-output refusal is the answerer's injection ceiling tripping — flag it.
         trace.injectionDetected = true;

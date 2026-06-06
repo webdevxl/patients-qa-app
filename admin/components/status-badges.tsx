@@ -2,7 +2,13 @@
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { CohortGroup, Confidence, Outcome, Severity } from "@/lib/types";
+import type {
+  AgentVariant,
+  CohortGroup,
+  Confidence,
+  Outcome,
+  Severity,
+} from "@/lib/types";
 
 // Brand-tinted status badges, reused by the table and the detail sheet. Colors come from
 // the CareBrain palette (periwinkle / indigo / status green-orange-red). `variant="outline"`
@@ -114,6 +120,38 @@ export function GroupBadge({
       className={cn("border-transparent font-semibold", groupClass[value], className)}
     >
       {value}
+    </Badge>
+  );
+}
+
+// A/B experiment arm. Teal = the structured-output control; amber = the tool-calling variant —
+// distinct hues from the cohort badge so the two dimensions don't read as the same thing.
+const variantClass: Record<AgentVariant, string> = {
+  structured: "bg-[#30b0c7]/15 text-[#1d7e90]",
+  tool_calling: "bg-[#ff9500]/15 text-[#a35f00]",
+};
+
+const variantLabel: Record<AgentVariant, string> = {
+  structured: "Structured",
+  tool_calling: "Tool-calling",
+};
+
+export function VariantBadge({
+  value,
+  className,
+}: {
+  value: AgentVariant | null;
+  className?: string;
+}) {
+  if (!value) {
+    return <span className={cn("text-muted-foreground", className)}>—</span>;
+  }
+  return (
+    <Badge
+      variant="outline"
+      className={cn("border-transparent font-medium", variantClass[value], className)}
+    >
+      {variantLabel[value] ?? value}
     </Badge>
   );
 }

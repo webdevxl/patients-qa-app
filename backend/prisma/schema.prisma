@@ -193,6 +193,7 @@ model RequestLog {
 
   // ── Request context ──
   group             String // active cohort 'A' | 'B'
+  variant           String? // A/B experiment arm: 'structured' | 'tool_calling' (null on legacy rows)
   agent             String? // which agent ran: 'find-patient' | 'answer-patient' | null (no model call)
   question          String // bounded upstream (MAX_QUESTION_CHARS)
   history           Json? // sanitized prior turns (ChatTurn[])
@@ -239,6 +240,7 @@ model RequestLog {
   durationMs   Int  @map("duration_ms")
 
   @@index([group])
+  @@index([variant])
   @@index([agent])
   @@index([createdAt])
   @@index([resolvedPatientId])

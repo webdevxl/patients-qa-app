@@ -4,6 +4,9 @@
 
 export type CohortGroup = "A" | "B";
 
+/** The A/B experiment arm — the agent architecture a request was routed to. */
+export type AgentVariant = "structured" | "tool_calling";
+
 export type Outcome =
   | "answered"
   | "patients_found"
@@ -37,6 +40,7 @@ export interface RequestLog {
   traceId: string;
   createdAt: string;
   group: CohortGroup;
+  variant: AgentVariant | null;
   agent: string | null;
   question: string;
   history: ChatTurn[] | null;
@@ -61,4 +65,19 @@ export interface RequestLog {
   outputTokens: number | null;
   totalTokens: number | null;
   durationMs: number;
+}
+
+/** One arm's aggregated A/B metrics, as returned by `GET /qa/metrics`. */
+export interface VariantMetrics {
+  variant: AgentVariant;
+  total: number;
+  outcomes: Record<string, number>;
+  confidence: Record<string, number>;
+  fallbackUsed: number;
+  injectionDetected: number;
+  cohortViolation: number;
+  avgInputTokens: number | null;
+  avgOutputTokens: number | null;
+  avgTotalTokens: number | null;
+  avgDurationMs: number | null;
 }

@@ -17,6 +17,7 @@ import {
   GroupBadge,
   OutcomeBadge,
   SeverityBadge,
+  VariantBadge,
 } from "./status-badges";
 
 const severityOrder: Record<Severity, number> = {
@@ -66,6 +67,12 @@ export const columns: ColumnDef<RequestLog>[] = [
     accessorKey: "group",
     header: "Cohort",
     cell: ({ row }) => <GroupBadge value={row.original.group} />,
+  },
+  {
+    accessorKey: "variant",
+    header: "Variant",
+    cell: ({ row }) => <VariantBadge value={row.original.variant} />,
+    filterFn: (row, id, value) => row.getValue(id) === value,
   },
   {
     accessorKey: "agent",

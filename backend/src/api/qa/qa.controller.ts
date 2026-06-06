@@ -4,7 +4,9 @@ import { QaService, QaResult } from './qa.service';
 import { RequestLogService } from '../../shared/observability/request-log.service';
 import type { ChatTurn } from '../../agents/agent-base';
 import { ActiveCohort } from '../../shared/security/active-cohort.decorator';
+import { ActiveVariant } from '../../shared/security/active-variant.decorator';
 import type { CohortGroup } from '../../shared/security/cohort.types';
+import type { AgentVariant } from '../../shared/security/variant.types';
 import type { QaStreamEvent } from './qa-stream.types';
 
 @Controller('qa')
@@ -28,11 +30,13 @@ export class QaController {
   @Post('query')
   async query(
     @ActiveCohort() group: CohortGroup,
+    @ActiveVariant() variant: AgentVariant,
     @Body()
     body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
   ): Promise<QaResult> {
     return this.qaService.query(
       group,
+      variant,
       body.question,
       body.history,
       body.patientId,
@@ -55,6 +59,7 @@ export class QaController {
   @Post('stream')
   async stream(
     @ActiveCohort() group: CohortGroup,
+    @ActiveVariant() variant: AgentVariant,
     @Body()
     body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
     @Res() res: Response,
@@ -72,6 +77,7 @@ export class QaController {
     try {
       const result = await this.qaService.query(
         group,
+        variant,
         body.question,
         body.history,
         body.patientId,
@@ -100,16 +106,29 @@ export class QaController {
     @Query('outcome') outcome?: string,
     @Query('cohortViolation') cohortViolation?: string,
     @Query('group') group?: string,
+    @Query('variant') variant?: string,
     @Query('agent') agent?: string,
     @Query('limit') limit?: string,
   ) {
     return this.requestLog.list({
       outcome,
       group,
+      variant,
       agent,
       cohortViolation:
         cohortViolation === undefined ? undefined : cohortViolation === 'true',
       limit: Math.min(Number(limit) || 100, 500),
     });
+  }
+
+  /**
+   * Per-variant A/B experiment metrics (task §4 "basic experiment metrics per variant"): one
+   * aggregate row per arm — request counts, outcome/confidence distributions, safety-flag rates, and
+   * average tokens + latency — computed straight from the `request_log` audit table. Feeds the admin
+   * panel's summary and the `EXPERIMENT_RESULTS.md` write-up. Behind the same guard as `/qa/logs`.
+   */
+  @Get('metrics')
+  async metrics() {
+    return this.requestLog.metricsByVariant();
   }
 }
