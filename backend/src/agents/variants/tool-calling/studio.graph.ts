@@ -17,12 +17,12 @@
  */
 import { createAgent } from 'langchain';
 import { PrismaClient } from '@prisma/client';
-import type { PrismaService } from '../shared/prisma/prisma.service';
-import { EmbeddingsService } from '../shared/embeddings/embeddings.service';
-import { createFindPatientsTool } from './tools/find-patients.tool';
-import { createChatModel } from './agent-base';
-import { createTracingMiddleware } from './middleware/tracing.middleware';
-import { createTerminateAfterToolMiddleware } from './middleware/terminate-after-tool.middleware';
+import type { PrismaService } from '../../../shared/prisma/prisma.service';
+import { EmbeddingsService } from '../../../shared/embeddings/embeddings.service';
+import { createFindPatientsTool } from '../../core/tools/find-patients.tool';
+import { createChatModel } from '../../core/agent-base';
+import { createTracingMiddleware } from '../../core/middleware/tracing.middleware';
+import { createTerminateAfterToolMiddleware } from '../../core/middleware/terminate-after-tool.middleware';
 
 // PrismaService adds only Nest lifecycle hooks on top of PrismaClient; the tool uses plain client
 // query methods, so a bare client is a safe structural substitute outside Nest.

@@ -1,8 +1,8 @@
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import type { RunnableConfig } from '@langchain/core/runnables';
-import type { OnGuardVerdict } from '../shared/security/injection-guard.middleware';
-import type { AgentVariant } from '../shared/security/variant.types';
+import type { OnGuardVerdict } from '../../shared/security/injection-guard.middleware';
+import type { AgentVariant } from '../../shared/security/variant.types';
 
 /**
  * Shared base for the two Q&A agents (`find-patient.agent.ts` and `answer-patient.agent.ts`):

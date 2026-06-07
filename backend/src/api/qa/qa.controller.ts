@@ -2,7 +2,7 @@ import { Body, Controller, Get, Post, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { QaService, QaResult } from './qa.service';
 import { RequestLogService } from '../../shared/observability/request-log.service';
-import type { ChatTurn } from '../../agents/agent-base';
+import type { ChatTurn } from '../../agents/core/agent-base';
 import { ActiveCohort } from '../../shared/security/active-cohort.decorator';
 import { ActiveVariant } from '../../shared/security/active-variant.decorator';
 import type { CohortGroup } from '../../shared/security/cohort.types';

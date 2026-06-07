@@ -8,7 +8,8 @@ import { z } from 'zod';
 import {
   observationFilterSchema,
   medicationFilterSchema,
-} from './tools/find-patients.tool';
+  findPatients,
+} from '../../core/tools/find-patients.tool';
 import {
   createChatModel,
   sanitizeAndTrim,
@@ -20,18 +21,22 @@ import {
   type ChatTurn,
   type TokenUsage,
   type TraceContext,
-} from './agent-base';
+} from '../../core/agent-base';
+import type { FindResolution, FindPatientResolver } from '../../core/find.contract';
+import type { PrismaService } from '../../../shared/prisma/prisma.service';
+import type { EmbeddingsService } from '../../../shared/embeddings/embeddings.service';
 
 /**
- * The FIND-PATIENT agent — the FIRST model step. Given a clinician's message about the cohort
- * ("which patients have diabetes?", "Erna Shearer", a UUID…) it extracts the search parameters that
- * the `findPatients` retrieval then uses to return a LIST of candidate patients. Its job ends there:
- * the UI picks one and sends that patient's id to the `answer-patient` agent.
+ * The STRUCTURED A/B arm of the FIND stage — the control. The FIRST model step: given a clinician's
+ * message about the cohort ("which patients have diabetes?", "Erna Shearer", a UUID…) it EXTRACTS the
+ * fixed `extractionSchema` search parameters, and {@link createStructuredFindResolver} then routes a
+ * deterministic `findPatients` retrieval in code. The model never decides which lookup to run and
+ * never answers the question.
  *
- * The model only ever EXTRACTS the fixed `extractionSchema` object — it never decides which
- * retrieval to run and never answers the question. Routing is deterministic code in `QaService`
- * (identity wins). Constraining the model to this fixed object (vs. free tool-calling / free text)
- * is the core prompt-injection defense: the only thing it can emit is this fixed set of fields.
+ * Constraining the model to this fixed object (vs. free tool-calling / free text) is the core
+ * prompt-injection defense: the only thing it can emit is this fixed set of fields. The
+ * tool-calling arm of this same stage lives in `variants/tool-calling/find-patient.agent.ts`; both
+ * return the shared {@link FindResolution} so `QaService` runs one code path.
  */
 
 // ───────────────────────────────── constants ─────────────────────────────────
@@ -222,6 +227,34 @@ export function createFindPatientAgent(options: ChatModelOptions = {}): FindPati
         return { extraction: EMPTY_EXTRACTION, usage: readUsage(raw), refused: true, raw: rawText };
       }
       return { extraction: parsed, usage: readUsage(raw), raw: rawText };
+    },
+  };
+}
+
+// ───────────────────────── structured (control) resolver ─────────────────────────
+
+/**
+ * The control arm's FIND resolver: reuse the structured-output extractor above, then route the
+ * retrieval in code — byte-identical to what `QaService` did inline before the A/B seam existed.
+ * Implements the shared {@link FindPatientResolver} contract so the service treats both arms alike.
+ */
+export function createStructuredFindResolver(
+  findAgent: FindPatientAgent,
+  prisma: PrismaService,
+  embeddings: EmbeddingsService,
+): FindPatientResolver {
+  return {
+    model: findAgent.model,
+    async resolve(question, history, group, trace): Promise<FindResolution> {
+      const extraction = await findAgent.extract(question, history, trace);
+      const retrieval = await findPatients(prisma, embeddings, extraction.extraction, group);
+      return {
+        retrieval,
+        usage: extraction.usage,
+        raw: extraction.raw,
+        refused: extraction.refused,
+        reasoning: extraction.extraction.reasoning,
+      };
     },
   };
 }

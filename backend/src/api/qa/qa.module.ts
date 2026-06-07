@@ -6,25 +6,21 @@ import { PrismaService } from '../../shared/prisma/prisma.service';
 import { EmbeddingsService } from '../../shared/embeddings/embeddings.service';
 import { EmbeddingsModule } from '../../shared/embeddings/embeddings.module';
 import { ObservabilityModule } from '../../shared/observability/observability.module';
-import { createFindPatientAgent } from '../../agents/find-patient.agent';
+import { FIND_PATIENT_RESOLVERS, type FindPatientResolvers } from '../../agents/core/find.contract';
+import { ANSWER_PATIENT_AGENTS, type AnswerPatientAgents } from '../../agents/core/answer.contract';
 import {
-  FIND_PATIENT_RESOLVERS,
+  createFindPatientAgent,
   createStructuredFindResolver,
-  createToolCallingFindResolver,
-  type FindPatientResolvers,
-} from '../../agents/find-resolver';
-import {
-  ANSWER_PATIENT_AGENTS,
-  createAnswerPatientAgent,
-  createAnswerPatientAgentToolCalling,
-  type AnswerPatientAgents,
-} from '../../agents/answer-patient.agent';
+} from '../../agents/variants/structured/find-patient.agent';
+import { createToolCallingFindResolver } from '../../agents/variants/tool-calling/find-patient.agent';
+import { createAnswerPatientAgent } from '../../agents/variants/structured/answer-patient.agent';
+import { createAnswerPatientAgentToolCalling } from '../../agents/variants/tool-calling/answer-patient.agent';
 import {
   createInjectionGuardClassifier,
   INJECTION_GUARD_CLASSIFIER,
   type InjectionGuardClassifier,
 } from '../../shared/security/injection-guard.classifier';
-import type { ChatModelOptions } from '../../agents/agent-base';
+import type { ChatModelOptions } from '../../agents/core/agent-base';
 
 /** Shared chat-model tuning from env (model + temperature), with the factory defaults as fallback. */
 function chatOptions(config: ConfigService): ChatModelOptions {

@@ -11,7 +11,7 @@ import {
   type ChatTurn,
   type TokenUsage,
   type RequestUsage,
-} from '../../agents/agent-base';
+} from '../../agents/core/agent-base';
 import {
   RequestLogService,
   newTrace,
@@ -23,20 +23,20 @@ import {
   FIND_PATIENT_RESOLVERS,
   type FindPatientResolvers,
   type FindResolution,
-} from '../../agents/find-resolver';
+} from '../../agents/core/find.contract';
 import {
   ANSWER_PATIENT_AGENTS,
-  serializePatientForPrompt,
   type AnswerPatientAgents,
   type AnswerConfidence,
-} from '../../agents/answer-patient.agent';
+} from '../../agents/core/answer.contract';
+import { serializePatientForPrompt } from '../../agents/core/answer.shared';
 import {
   patientInclude,
   toPatientDetail,
   type FindPatientsResult,
   type PatientDetail,
   type ConditionMatch,
-} from '../../agents/tools/find-patients.tool';
+} from '../../agents/core/tools/find-patients.tool';
 import type { CohortGroup } from '../../shared/security/cohort.types';
 import type { AgentVariant } from '../../shared/security/variant.types';
 import {

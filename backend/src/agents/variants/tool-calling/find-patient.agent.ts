@@ -8,99 +8,29 @@ import {
   buildRunConfig,
   DEFAULT_CHAT_MODEL,
   type ChatModelOptions,
-  type ChatTurn,
-  type TokenUsage,
-  type TraceContext,
-} from './agent-base';
-import type { FindPatientAgent } from './find-patient.agent';
+} from '../../core/agent-base';
+import { createFindPatientsTool, type FindPatientsResult } from '../../core/tools/find-patients.tool';
+import { createTerminateAfterToolMiddleware } from '../../core/middleware/terminate-after-tool.middleware';
+import { createTracingMiddleware } from '../../core/middleware/tracing.middleware';
+import type { PrismaService } from '../../../shared/prisma/prisma.service';
+import type { EmbeddingsService } from '../../../shared/embeddings/embeddings.service';
+import type { CohortGroup } from '../../../shared/security/cohort.types';
 import {
-  findPatients,
-  createFindPatientsTool,
-  type FindPatientsResult,
-} from './tools/find-patients.tool';
-import { createTerminateAfterToolMiddleware } from './middleware/terminate-after-tool.middleware';
-import { createTracingMiddleware } from './middleware/tracing.middleware';
-import type { PrismaService } from '../shared/prisma/prisma.service';
-import type { EmbeddingsService } from '../shared/embeddings/embeddings.service';
-import type { CohortGroup } from '../shared/security/cohort.types';
-import type { AgentVariant } from '../shared/security/variant.types';
+  EMPTY_RETRIEVAL,
+  type FindResolution,
+  type FindPatientResolver,
+} from '../../core/find.contract';
 
 /**
- * The FIND stage behind ONE seam, so `QaService` runs a single code path for both A/B arms. A
- * resolver takes the clinician's question + history and returns the SAME {@link FindPatientsResult}
- * the downstream shaping already expects — only HOW it gets there differs:
+ * The TOOL-CALLING A/B arm of the FIND stage. Instead of extracting a fixed schema, the LLM itself
+ * decides which lookup to run by CALLING the single `find_patients` tool (the classic agent loop,
+ * exactly like studio.graph.ts), and we read the tool's result back. It implements the shared
+ * {@link FindPatientResolver} contract and returns the SAME {@link FindResolution} the structured arm
+ * does, so `QaService` runs one code path.
  *
- *   • 'structured'   — the control: a `withStructuredOutput` extraction (find-patient.agent.ts) then
- *                      a deterministic `findPatients(...)` call routed in code.
- *   • 'tool_calling' — the LLM itself decides which lookup to run by CALLING the `find_patients` tool
- *                      (the classic agent loop, exactly like studio.graph.ts), and we read the tool's
- *                      result back.
- *
- * Cohort isolation is identical on both arms: `findPatients(..., group)` scopes every SQL read, and
- * the tool-calling tool is BOUND to `group` at construction — the model can pass search args but can
- * never reach another cohort.
+ * Cohort isolation is identical to the control arm: the tool is BOUND to `group` at construction — the
+ * model can pass search args but can never reach another cohort.
  */
-
-/** Nest DI token: a map of both arms' find resolvers, selected per request by the session variant. */
-export const FIND_PATIENT_RESOLVERS = Symbol('FIND_PATIENT_RESOLVERS');
-
-/** Both arms' resolvers, keyed by variant — what `QaService` injects and indexes. */
-export type FindPatientResolvers = Record<AgentVariant, FindPatientResolver>;
-
-/** Normalized result of the FIND stage — variant-agnostic, so downstream shaping never branches. */
-export interface FindResolution {
-  retrieval: FindPatientsResult;
-  usage?: TokenUsage;
-  /** Best-effort raw model output (extraction object / tool-call args) — for the audit log. */
-  raw?: string;
-  /** Structured-output refusal (the extractor's injection ceiling tripped). Only the structured arm. */
-  refused?: boolean;
-  /** Audit rationale for the search params (the extractor writes one; the tool arm has none). */
-  reasoning?: string | null;
-}
-
-export interface FindPatientResolver {
-  /** The resolved chat model name — surfaced so the service can report it in usage. */
-  readonly model: string;
-  resolve(
-    question: string,
-    history: ChatTurn[],
-    group: CohortGroup,
-    trace: TraceContext,
-  ): Promise<FindResolution>;
-}
-
-/** Nothing resolved/matched — the fail-closed result that routes to the safe fallback. */
-const EMPTY_RETRIEVAL: FindPatientsResult = { query: {}, matchCount: 0 };
-
-// ───────────────────────── structured (control) resolver ─────────────────────────
-
-/**
- * The control arm: reuse the existing structured-output extractor, then route the retrieval in code —
- * byte-identical to what `QaService` did inline before the A/B seam existed.
- */
-export function createStructuredFindResolver(
-  findAgent: FindPatientAgent,
-  prisma: PrismaService,
-  embeddings: EmbeddingsService,
-): FindPatientResolver {
-  return {
-    model: findAgent.model,
-    async resolve(question, history, group, trace): Promise<FindResolution> {
-      const extraction = await findAgent.extract(question, history, trace);
-      const retrieval = await findPatients(prisma, embeddings, extraction.extraction, group);
-      return {
-        retrieval,
-        usage: extraction.usage,
-        raw: extraction.raw,
-        refused: extraction.refused,
-        reasoning: extraction.extraction.reasoning,
-      };
-    },
-  };
-}
-
-// ───────────────────────── tool-calling resolver ─────────────────────────
 
 /**
  * SYSTEM prompt for the tool-calling FIND arm — the agent's only job is to call `find_patients` with

@@ -2,7 +2,7 @@
   "node_version": "20",
   "dependencies": ["."],
   "graphs": {
-    "patient_qa": "./src/agents/studio.graph.ts:graph"
+    "patient_qa": "./src/agents/variants/tool-calling/studio.graph.ts:graph"
   },
   "env": "../.env"
 }

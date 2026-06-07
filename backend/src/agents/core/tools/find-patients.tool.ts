@@ -1,10 +1,10 @@
 import { tool } from 'langchain';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
-import type { PrismaService } from '../../shared/prisma/prisma.service';
-import type { EmbeddingsService } from '../../shared/embeddings/embeddings.service';
-import { toVectorLiteral } from '../../shared/embeddings/embeddings.factory';
-import type { CohortGroup } from '../../shared/security/cohort.types';
+import type { PrismaService } from '../../../shared/prisma/prisma.service';
+import type { EmbeddingsService } from '../../../shared/embeddings/embeddings.service';
+import { toVectorLiteral } from '../../../shared/embeddings/embeddings.factory';
+import type { CohortGroup } from '../../../shared/security/cohort.types';
 
 /**
  * Observation measurements live in `patient_observation.data` (JSONB) as

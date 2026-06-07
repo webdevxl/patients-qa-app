@@ -1,9 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import type { ChatTurn, TokenUsage } from '../../agents/agent-base';
-import type { AnswerConfidence } from '../../agents/answer-patient.agent';
-import type { FindPatientsResult } from '../../agents/tools/find-patients.tool';
+import type { ChatTurn, TokenUsage } from '../../agents/core/agent-base';
+import type { AnswerConfidence } from '../../agents/core/answer.contract';
+import type { FindPatientsResult } from '../../agents/core/tools/find-patients.tool';
 import type { CohortGroup } from '../security/cohort.types';
 import { AGENT_VARIANTS, type AgentVariant } from '../security/variant.types';
 

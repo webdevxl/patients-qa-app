@@ -1,7 +1,7 @@
 import { createMiddleware, AIMessage } from 'langchain';
 import { type BaseMessage } from '@langchain/core/messages';
 import { z } from 'zod';
-import { ANSWER_FALLBACK } from '../../agents/agent-base';
+import { ANSWER_FALLBACK } from '../../agents/core/agent-base';
 import {
   type InjectionGuardClassifier,
   type GuardVerdict,
