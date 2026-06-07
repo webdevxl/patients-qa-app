@@ -74,9 +74,9 @@ export function TokenUsageBar({ usage, accent }: TokenUsageBarProps) {
       borderTopWidth={1}
       borderTopColor={palette.hairline}
       paddingHorizontal={16}
-      paddingTop={8}
-      paddingBottom={8}
-      gap={6}
+      paddingTop={6}
+      paddingBottom={6}
+      gap={5}
     >
       {/* Header row — tap to expand/collapse the breakdown. */}
       <XStack
@@ -126,17 +126,13 @@ export function TokenUsageBar({ usage, accent }: TokenUsageBarProps) {
         />
       </XStack>
 
-      {/* Context-window meter — the headline visual, always shown. */}
-      <YStack gap={4}>
-        <XStack justifyContent="space-between" alignItems="center">
-          <Text fontSize={11} color={palette.tertiaryLabel}>
-            Context
-          </Text>
-          <Text fontFamily="$mono" fontSize={11} color={palette.secondaryLabel}>
-            {hasData ? `${pctLabel}% of ${formatCompact(usage.contextWindow)}` : 'No turns yet'}
-          </Text>
-        </XStack>
+      {/* Context-window meter — label, bar, and fill % on one compact row. */}
+      <XStack alignItems="center" gap={8}>
+        <Text fontSize={11} color={palette.tertiaryLabel}>
+          Context
+        </Text>
         <YStack
+          flex={1}
           height={6}
           borderRadius={radius.chip}
           backgroundColor={palette.tertiarySystemFill}
@@ -149,7 +145,10 @@ export function TokenUsageBar({ usage, accent }: TokenUsageBarProps) {
             backgroundColor={accent}
           />
         </YStack>
-      </YStack>
+        <Text fontFamily="$mono" fontSize={11} color={palette.secondaryLabel}>
+          {hasData ? `${pctLabel}% of ${formatCompact(usage.contextWindow)}` : 'No turns yet'}
+        </Text>
+      </XStack>
 
       {/* Expanded breakdown — input/output split, turn count, model. */}
       {expanded && hasData ? (

@@ -54,8 +54,8 @@ function VariantSegment({
       cursor="pointer"
       alignItems="center"
       gap={4}
-      paddingHorizontal={10}
-      paddingVertical={5}
+      paddingHorizontal={9}
+      paddingVertical={4}
       borderRadius={radius.chip}
       backgroundColor={active ? color : 'transparent'}
     >
@@ -74,9 +74,9 @@ export function TemplateBar({ agent, variant, onVariantChange, onSelect, accent 
   return (
     <YStack
       paddingHorizontal={16}
-      paddingTop={10}
-      paddingBottom={8}
-      gap={8}
+      paddingTop={8}
+      paddingBottom={6}
+      gap={6}
       backgroundColor={palette.systemGroupedBackground}
       borderTopWidth={1}
       borderTopColor={palette.hairline}
@@ -123,8 +123,8 @@ export function TemplateBar({ agent, variant, onVariantChange, onSelect, accent 
               cursor="pointer"
               alignItems="center"
               gap={5}
-              paddingHorizontal={12}
-              paddingVertical={8}
+              paddingHorizontal={11}
+              paddingVertical={6}
               borderRadius={radius.chip}
               backgroundColor={v.tint}
               borderWidth={1}
