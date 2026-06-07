@@ -1,170 +1,183 @@
 # Patient Q&A AI Assistant
 
-A vertical-slice prototype of a clinician-facing assistant that answers questions about patients within a selected cohort (Group A / Group B), grounded in their records.
-
-> **Status: starting scaffold.** This milestone delivers a runnable project skeleton and a **seeded PostgreSQL database**. The Q&A agent, cohort-scoped retrieval, prompt-injection defenses, A/B testing, and evaluation are **not implemented yet** — they build on this foundation.
+A clinician-facing assistant that answers questions about patients within a
+selected cohort (**Group A** / **Group B**), grounded strictly in their records.
+Pick a cohort, ask in plain language ("does Maria Lopez have any drug
+allergies?"), and get a concise answer with **citations to the source records**
+and a **confidence level** — never crossing the cohort boundary.
 
 ## Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Database | PostgreSQL 16 (Docker) |
-| ORM / seeding | Prisma |
-| Backend | Nest.js |
-| Frontend | Expo (React Native) |
-| LLM orchestration | LangChain *(installed, not yet wired up)* |
+| Database | PostgreSQL 16 + pgvector (Docker) |
+| ORM / seeding | Prisma 6 |
+| Backend | Nest.js 11 (TypeScript) |
+| LLM orchestration | LangChain 1.x (`langchain` + `@langchain/openai`) |
+| Frontend | Expo / React Native 0.76 (web + native) |
+| Admin panel | Next.js (static SPA) |
 
-## Project layout
+## Architecture overview
+
+Four moving parts around one Postgres database:
 
 ```
-patients-qa/
-├── docker-compose.yml        # PostgreSQL service
-├── .env                      # single source of truth (gitignored — copy from .env.example)
-├── .env.example              # canonical key set for backend + admin + tooling
-├── backend/                  # Nest.js + Prisma
-│   ├── prisma/
-│   │   ├── schema.prisma     # 5 models mapped to the CSV tables
-│   │   ├── seed.ts           # CSV -> DB seeder
-│   │   └── seed-data/        # copies of the source CSVs
-│   └── src/                  # app module, health endpoint, PrismaService
-├── frontend/                 # Expo app (placeholder screen)
-├── admin/                    # Next.js observability log viewer (static SPA, no SSR)
-├── db-dump/                  # portable schema + data + embeddings dump w/ install.sh
-└── task/                     # assignment brief + original CSVs
+┌───────────┐   ┌───────────┐        ┌──────────────────────────────┐   ┌──────────────┐
+│ Frontend  │   │  Admin    │        │          Backend             │   │  PostgreSQL  │
+│ Expo app  │──▶│ Next.js   │──────▶ │          Nest.js             │──▶│  + pgvector  │
+│ (chat UI) │   │ (logs/    │  HTTP  │  auth · QA agents · guards   │   │  patients +  │
+│  :8081/80 │   │  metrics) │        │  observability   :3000       │   │  embeddings  │
+└───────────┘   │   :3200   │        └──────────────────────────────┘   │    :5433     │
+                └───────────┘                                            └──────────────┘
 ```
 
-> **One env file, top-level.** There are no per-app `.env` / `.env.local`
-> files anymore — backend (via `node --env-file=../.env` baked into npm
-> scripts + a `ConfigModule.envFilePath` fallback) and admin (via
-> `dotenv.config()` at the top of `next.config.ts`) both load the root `/.env`
-> directly. Keep new vars there.
+- **PostgreSQL + pgvector** — the 5 patient tables (patient, allergy, condition,
+  medication, observation), plus `allergen` / `icd_code` vocabulary tables that
+  carry `vector(1536)` embeddings for semantic search, plus a `request_log`
+  audit table. Only `patient` has the cohort key `group`; child records inherit
+  it through `patientId → patient.group`.
 
-## Data model
+- **Backend (Nest.js + Prisma + LangChain)** — the brains. Key routes:
+  - `POST /auth/session` — the only public route: pick a cohort (`A`/`B`), get
+    back a signed session token (sent as Basic auth on every later request) and a
+    deterministic A/B variant assignment.
+  - `POST /qa/query` (and its SSE twin `POST /qa/stream`) — the one chat endpoint.
+    No `patientId` ⇒ **FIND** (resolve/search patients *within the cohort*);
+    `patientId` set ⇒ **ANSWER** (grounded answer + citations + confidence from
+    *that* patient's records only).
+  - `GET /qa/logs`, `GET /qa/metrics`, `GET /qa/metrics/category` — observability
+    and A/B / per-category evaluation.
+  - `GET /health` — DB connectivity + seeded row counts.
 
-Five tables are imported verbatim from the provided CSVs:
+  **Safety is enforced here, not in the DB:** a cohort auth guard scopes every
+  read to the caller's group, and layered prompt-injection defenses (structural
+  output ceilings + an opt-in classifier) sit in front of the agents. Two agent
+  variants (`structured` vs `tool_calling`) back the A/B test.
 
-| Table | Rows | Notes |
-|-------|------|-------|
-| `patient` | 120 | Carries the cohort key `group` (`A`/`B`): **65 in A, 55 in B** |
-| `patient_allergy` | 97 | FK `patient_id` |
-| `patient_condition` | 1695 | ICD-10 coded diagnoses |
-| `patient_medication` | 937 | Prescriptions + directions |
-| `patient_observation` | 775 | Vitals/metrics as JSON in `data` |
+- **Frontend (Expo)** — the clinician chat UI (web via `react-native-web`, or
+  native via Expo Go / simulators): cohort selection, patient search, Q&A with
+  citations, confidence, and a token-usage meter.
 
-**Cohort isolation:** only `patient` has a `group` column; child records inherit cohort through `patient_id → patient.group`. The schema indexes `patient.group` and each `patient_id` FK so cohort-scoped queries stay cheap. Enforcement of that boundary lives in the (future) application layer.
+- **Admin (Next.js)** — a static SPA that reads the audit log and renders it as a
+  searchable table plus the A/B and per-category scorecards.
+
+**Request flow:** select cohort → token → ask → backend FINDs the patient *in
+your cohort* → retrieves only that patient's records → returns a grounded answer
+with citations + confidence. Every request is logged.
 
 ## Prerequisites
 
-- Node.js 20+ (tested on 22)
-- Docker + Docker Compose
-- For the frontend: the Expo Go app (iOS/Android) or a simulator, or just run on web
+- **Node.js 22+** and npm
+- **Docker + Docker Compose** (for the server install, or to run just the DB locally)
+- An **OpenAI API key** (the agents and embeddings call OpenAI)
 
-## Setup & run
+## Configuration
 
-### 1. Configure env + start PostgreSQL
-
-```bash
-cp .env.example .env            # required — all apps load /.env at the repo root
-docker compose up -d
-docker compose ps               # wait for the db service to be healthy
-```
-
-Postgres is exposed on host port **5433** (to avoid clashing with any Postgres
-already on 5432); the connection strings in `.env.example` already match. Fill in
-`OPENAI_API_KEY` and `JWT_SECRET` before running the backend — those are
-required.
-
-### 2. Backend — create schema, seed, run
+There is **one env file**, `/.env` at the repo root — every app loads it. Copy
+the template and fill in the required values before starting anything:
 
 ```bash
-cd backend
-npm install
-npm run prisma:migrate -- --name init   # creates the 5 tables
-npm run db:seed                         # loads the CSVs
-npm run start:dev                       # http://localhost:3000
+cp .env.example .env
 ```
 
-> If port 3000 is already in use, set a different one: `PORT=3001 npm run start:dev`.
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `OPENAI_API_KEY` | ✅ | Used by the find/answer agents and embeddings. |
+| `JWT_SECRET` | ✅ | Signs cohort session tokens. Use `openssl rand -hex 32`. |
+| `DATABASE_URL` | ✅ | Defaults to the local DB on port **5433**. |
+| `PUBLIC_HOST` | server only | The server's public IP/domain. Baked into the frontend & admin builds so the browser can reach the backend. Set it for the Docker Compose install. |
 
-Verify it's up and the data landed:
+---
+
+## Installation on the Server (Docker Compose)
+
+Everything — database, backend, frontend, and admin — runs in containers. **First
+start (including restoring the database):**
+
+1. **Configure env.** `cp .env.example .env`, then set `OPENAI_API_KEY`,
+   `JWT_SECRET`, and add `PUBLIC_HOST` (the server's public IP or domain).
+2. **Start the database** and wait for it to be healthy:
+   ```bash
+   docker compose up -d db
+   docker compose ps
+   ```
+3. **Restore the database** (schema + data + pgvector embeddings) from the
+   bundled dump — this skips recomputing embeddings:
+   ```bash
+   cd db-dump && ./restore.sh --compose -y && cd ..
+   ```
+4. **Start the rest of the stack** (builds and runs backend, frontend, admin):
+   ```bash
+   docker compose up -d
+   ```
+5. **Open the apps:**
+   - Frontend (chat): `http://<PUBLIC_HOST>/`
+   - Admin (logs/metrics): `http://<PUBLIC_HOST>:3200/`
+   - Backend health: `http://<PUBLIC_HOST>:3000/health`
+
+**Start / stop afterwards:**
 
 ```bash
-curl http://localhost:3000/health
-# -> { "status":"ok", "database":"connected",
-#      "counts": { "patients":120, "allergies":97, "conditions":1695,
-#                  "medications":937, "observations":775 } }
+docker compose up -d     # start the whole stack
+docker compose down      # stop it (add -v to also wipe the DB volume)
 ```
 
-You can also browse the data with `npx prisma studio`.
+---
 
-### 3. Frontend (Expo)
+## Local Installation (without Docker)
 
-```bash
-cd frontend
-npm install
-npm start                       # starts the Metro dev server (port 8081)
-```
+Run each app natively with Node. You need a **PostgreSQL 16+ with the `pgvector`
+extension** reachable at the `DATABASE_URL` in `/.env` (the default expects port
+**5433**).
 
-Then choose how to open the app from the Expo CLI prompt:
+> 💡 If you'd rather not install pgvector by hand, the one-liner
+> `docker compose up -d db` gives you exactly the right Postgres on `:5433` while
+> you still run the apps natively below.
 
-| Key / command | Opens in | Requires |
-|---------------|----------|----------|
-| press `w` (or `npm run web`) | Browser, via `react-native-web` | — (web deps included) |
-| press `i` | iOS Simulator | Xcode |
-| press `a` | Android emulator | Android Studio / an emulator |
-| scan the QR code | Your phone | the **Expo Go** app |
+**First start (including restoring the database):**
 
-The app currently renders a placeholder screen confirming it builds.
+1. **Configure env.** `cp .env.example .env`, then set `OPENAI_API_KEY`,
+   `JWT_SECRET`, and point `DATABASE_URL` at your Postgres.
+2. **Restore the database** (schema + data + embeddings) via host `psql` — needs
+   `psql` 16+ on your machine:
+   ```bash
+   cd db-dump && ./restore.sh && cd ..
+   ```
+3. **Backend** → http://localhost:3000
+   ```bash
+   cd backend && npm install && npm run start:dev
+   ```
+   Verify: `curl http://localhost:3000/health` should report `"database":"connected"`
+   with 120 patients.
+4. **Frontend** → http://localhost:8081 (press `w` for web, or `i`/`a`/scan the QR)
+   ```bash
+   cd frontend && npm install && npm start
+   ```
+5. **Admin** → http://localhost:3200
+   ```bash
+   cd admin && npm install && npm run dev
+   ```
 
-> **Heads-up:** opening `http://localhost:8081` directly in a browser shows a
-> JSON **manifest**, not the app — that's the Metro dev server's endpoint for
-> native clients, and is expected. Let Expo open the browser tab for you (or
-> press `w`); web mode then serves the actual rendered app on the same port.
-> Note that web mode renders the UI full-window via `react-native-web` — it is
-> **not** a phone-frame emulator. For a device frame, use `i` / `a` / Expo Go.
+The frontend and admin both default to the backend at `http://localhost:3000`,
+so no extra URL config is needed for local runs.
 
-### 4. Admin panel — observability log viewer
+**Start commands afterwards:** `npm run start:dev` (backend), `npm start`
+(frontend), `npm run dev` (admin) — each from its own directory.
 
-A standalone **Next.js** app (client-rendered SPA, no SSR) that renders the observability
-audit log (`GET /qa/logs`) as a sortable, filterable data table with a click-through detail
-drawer (ShadCN). Styled to match the CareBrain brand.
+---
 
-```bash
-cd admin
-npm install
-npm run dev                     # http://localhost:3200
-```
+## Useful backend scripts
 
-Sign in with the primitive gate (`admin` / `admin` by default — configurable via
-`NEXT_PUBLIC_ADMIN_USER` / `NEXT_PUBLIC_ADMIN_PASSWORD` in the root `/.env`). It needs the
-**backend running on :3000** — the admin mints a cohort session token under the hood to
-authorize `/qa/logs`. `npm run build` emits a fully static bundle to `admin/out/`;
-`next.config.ts` loads `../.env` at startup so `NEXT_PUBLIC_*` vars are inlined.
-
-> **⚠️ The login is a UI gate only, not real auth** — `NEXT_PUBLIC_*` values are inlined
-> into the browser bundle. A real deployment would gate `/qa/logs` behind a server-side
-> admin role (see `SECURITY.md`).
->
-> **npm gotcha:** if `npm install` later fails to render styles with
-> `Cannot find module '…lightningcss.darwin-arm64.node'`, your global `~/.npmrc` has
-> `os=macos` (it should be `darwin`, or unset), which makes npm skip platform-specific
-> optional deps. Fix the npmrc, or reinstall the binary with
-> `npm install lightningcss-darwin-arm64 --os=darwin --cpu=arm64 --no-save`.
-
-## Useful scripts (backend)
+Run from `backend/` (each loads `/.env` automatically):
 
 | Command | Description |
 |---------|-------------|
-| `npm run start:dev` | Run Nest.js in watch mode |
-| `npm run db:seed` | Re-seed the database (idempotent) |
-| `npm run db:reset` | Drop, re-migrate, and re-seed |
-| `npx prisma studio` | Visual data browser |
+| `npm run start:dev` | Run Nest.js in watch mode (port 3000). |
+| `npm run db:seed` | Seed the DB from the source CSVs (idempotent). |
+| `npm run db:reset` | Drop, re-migrate, and re-seed. |
+| `npx prisma studio` | Visual data browser. |
 
-## Roadmap (not in this milestone)
-
-- Cohort selection → session token → cohort-scoped requests
-- LangChain agent: patient resolution + grounded retrieval + citations + confidence
-- Layered prompt-injection / cross-cohort defenses
-- Deterministic A/B prompt variants + metrics (`EXPERIMENT_RESULTS.md`)
-- Per-request observability logging
-- Evaluation dataset + `SECURITY.md`
+> **Seed vs. restore:** `db:seed` rebuilds the relational data from CSVs but does
+> **not** include the pgvector embeddings (those are recomputed via the
+> `db:embed-*` scripts and cost OpenAI tokens). For a complete, ready-to-use DB,
+> prefer `db-dump/restore.sh` as shown above.
