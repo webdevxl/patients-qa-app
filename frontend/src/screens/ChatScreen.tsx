@@ -23,6 +23,8 @@ import { PatientSummaryCard } from '../components/PatientSummaryCard';
 import { PinnedPatientCard } from '../components/PinnedPatientCard';
 import { PatientDetailModal } from '../components/PatientDetailModal';
 import { TokenUsageBar, ZERO_USAGE, type SessionUsage } from '../components/TokenUsageBar';
+import { TemplateBar } from '../components/TemplateBar';
+import type { TemplateVariant } from '../domain/promptTemplates';
 import {
   postQaQuery,
   streamQaQuery,
@@ -45,23 +47,6 @@ interface ChatScreenProps {
 
 /** The guided-flow phase. `choosing` hides the composer and shows only the candidate list. */
 type Mode = 'search' | 'choosing' | 'patient';
-
-// Starter prompts for the FIND phase — each seeded with real values from the seeded DB. `text` is
-// the clean question sent to the backend; the bracketed note in `label` documents what it resolves
-// to. Cohort isolation applies, so a prompt only resolves when that patient/allergen is in the
-// active group.
-const SUGGESTIONS: { label: string; text: string }[] = [
-  { label: 'Find the patient named Erna Shearer  [Erna Shearer]', text: 'Find the patient named Erna Shearer' },
-  {
-    label: 'Find the patient with ID 9f81c036…  [Buffy Alonzo]',
-    text: 'Find the patient with ID 9f81c036-a344-4626-a59c-30a8014b9bc2',
-  },
-  { label: 'Find the patient with condition A52.8  [Maybelle Nicholson]', text: 'Find the patient with condition A52.8' },
-  { label: 'Find the patient taking Carvedilol  [Jarrod Whitley]', text: 'Find the patient taking Carvedilol' },
-  { label: 'Find patients allergic to penicillin  [top 5 of 13]', text: 'Find patients allergic to penicillin' },
-  { label: 'Find patients allergic to sulfa antibiotics  [top 5 of 10]', text: 'Find patients allergic to sulfa antibiotics' },
-  { label: 'Find patients allergic to codeine  [8 patients]', text: 'Find patients allergic to codeine' },
-];
 
 let messageSeq = 0;
 const nextId = () => `m${messageSeq++}`;
@@ -131,6 +116,9 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
   const [mode, setMode] = useState<Mode>('search');
+  // Which template variant the bar shows (Safe vs Dangerous). Persists across phases; the agent set
+  // it points at follows `mode`. Defaults to the ordinary clinical questions.
+  const [templateVariant, setTemplateVariant] = useState<TemplateVariant>('safe');
   // Cumulative token accounting across the session, accumulated from each response's `usage`. The
   // backend is stateless, so this running total lives here; the TokenUsageBar footer renders it.
   const [usage, setUsage] = useState<SessionUsage>(ZERO_USAGE);
@@ -145,8 +133,6 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
       text: `I'm scoped to ${meta.label}. First find a patient — by name, ID, condition, allergy, medication, or a measurement — then pick one and ask anything about their records. Other cohorts stay invisible to me.`,
     },
   ]);
-
-  const hasAsked = messages.some((m) => m.role === 'user');
 
   const scrollToEnd = () =>
     requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated: true }));
@@ -511,45 +497,20 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
           ) : null}
         </ScrollView>
 
-        {/* Starter suggestions — only before the first question, only while searching. */}
-        {mode === 'search' && !hasAsked ? (
-          <YStack
-            paddingHorizontal={16}
-            paddingTop={10}
-            paddingBottom={2}
-            gap={8}
-            backgroundColor={palette.systemGroupedBackground}
-          >
-            <Text fontSize={12} fontWeight="600" color={palette.tertiaryLabel} letterSpacing={0.2}>
-              TRY ASKING
-            </Text>
-            <XStack flexWrap="wrap" gap={8}>
-              {SUGGESTIONS.map((s) => (
-                <XStack
-                  key={s.label}
-                  onPress={() => setDraft(s.text)}
-                  accessibilityRole="button"
-                  animation="quick"
-                  pressStyle={{ scale: 0.97, opacity: 0.8 }}
-                  cursor="pointer"
-                  paddingHorizontal={12}
-                  paddingVertical={8}
-                  borderRadius={999}
-                  backgroundColor={palette.surface}
-                  borderWidth={1}
-                  borderColor={palette.hairline}
-                >
-                  <Text fontSize={13} color={palette.label} letterSpacing={-0.1}>
-                    {s.label}
-                  </Text>
-                </XStack>
-              ))}
-            </XStack>
-          </YStack>
-        ) : null}
-
         {/* Token-usage footer — always visible across phases; cumulative spend + context meter. */}
         <TokenUsageBar usage={usage} accent={accent} />
+
+        {/* Prompt-template bar — always on (except while choosing, when the composer is hidden too).
+            Auto-follows the phase: find templates while searching, answer templates once pinned. */}
+        {mode === 'choosing' ? null : (
+          <TemplateBar
+            agent={mode === 'patient' ? 'answer-patient' : 'find-patient'}
+            variant={templateVariant}
+            onVariantChange={setTemplateVariant}
+            onSelect={setDraft}
+            accent={accent}
+          />
+        )}
 
         {/* Composer — hidden while choosing (the list IS the only interaction); placeholder adapts. */}
         {mode === 'choosing' ? (
