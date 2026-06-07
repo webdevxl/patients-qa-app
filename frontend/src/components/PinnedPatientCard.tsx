@@ -92,7 +92,9 @@ export function PinnedPatientCard({
         <Ionicons name="chevron-forward" size={14} color={palette.tertiaryLabel} />
       </XStack>
 
-      <XStack
+      {/* Change-patient pill — temporarily hidden; to be reinstated later. `onChange` is kept on the
+          props so re-enabling is just un-commenting this block. */}
+      {/* <XStack
         onPress={onChange}
         accessibilityRole="button"
         accessibilityLabel="Change patient"
@@ -111,7 +113,7 @@ export function PinnedPatientCard({
         <Text fontSize={13} fontWeight="600" color={accent} letterSpacing={-0.2}>
           Change
         </Text>
-      </XStack>
+      </XStack> */}
     </XStack>
   );
 }

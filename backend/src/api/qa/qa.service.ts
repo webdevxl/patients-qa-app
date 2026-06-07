@@ -42,6 +42,7 @@ import type { CohortGroup } from '../../shared/security/cohort.types';
 import type { AgentVariant } from '../../shared/security/variant.types';
 import {
   INJECTION_GUARD_CLASSIFIER,
+  CATEGORY_COHORT,
   type InjectionGuardClassifier,
   type GuardVerdict,
 } from '../../shared/security/injection-guard.classifier';
@@ -159,9 +160,14 @@ export class QaService {
   /**
    * Apply a guard verdict to the per-request audit-log trace. Shared by the find path (inline call
    * before extraction) and the answer path (via `onGuardVerdict` runtime context) so both call
-   * sites stamp the same fields the same way. A `block` verdict also escalates severity, sets the
-   * outcome to `injection_refused`, and marks the request as fallback-bound — the caller is
-   * responsible for actually substituting the safe fallback.
+   * sites stamp the same fields the same way. A `block` verdict marks the request fallback-bound and
+   * classifies it BY THE GUARD'S CATEGORY — the two attack kinds are NOT the same audit event:
+   *   • cross_cohort_access → a cohort-boundary event: `cohortViolation` + `outcome: cohort_violation`
+   *                           + HIGH severity (the same way a foreign-`patientId` block is recorded),
+   *   • everything else (system_prompt_override / none) → an injection: `injectionDetected` +
+   *                           `outcome: injection_refused` + MEDIUM severity.
+   * Without this split a blocked cross-cohort attempt would be miscounted as an injection in the
+   * audit log / admin panel. The caller still substitutes the safe fallback.
    */
   private applyGuardVerdict(trace: RequestTrace, verdict: GuardVerdict): void {
     const { verdict: decision, category, confidence, reason } = verdict;
@@ -169,11 +175,16 @@ export class QaService {
     trace.guardCategory = category;
     trace.guardConfidence = confidence;
     trace.guardReason = reason;
-    if (decision === 'block') {
+    if (decision !== 'block') return;
+    trace.fallbackUsed = true;
+    if (category === CATEGORY_COHORT) {
+      trace.cohortViolation = true;
+      trace.severity = bump(trace.severity, 'high');
+      trace.outcome = 'cohort_violation';
+    } else {
       trace.injectionDetected = true;
       trace.severity = bump(trace.severity, 'medium');
       trace.outcome = 'injection_refused';
-      trace.fallbackUsed = true;
     }
   }
 
@@ -494,8 +505,14 @@ export class QaService {
       const answerReasoning = result.reasoning?.trim() ? result.reasoning : null;
       trace.answerReasoning = answerReasoning;
       reqUsage = this.toRequestUsage(usage, answerAgent.model);
-      if (refused) {
-        // A structured-output refusal is the answerer's injection ceiling tripping — flag it.
+      // A `block` from the injection guard ALSO surfaces here as `refused` (it jumps the agent to
+      // `end` with no structured output). But `applyGuardVerdict` (via `onGuardVerdict`) has already
+      // classified that case — as injection OR cohort-violation — so the refusal handling below must
+      // NOT re-stamp it as injection, or a blocked cross-cohort attempt reverts to `injection_refused`.
+      const guardBlocked = trace.guardVerdict === 'block';
+      if (refused && !guardBlocked) {
+        // A structured-output refusal that ISN'T a guard block is the answerer's own injection
+        // ceiling tripping — flag it.
         trace.injectionDetected = true;
         trace.severity = bump(trace.severity, 'medium');
         this.logger.warn(`🛡️ [${shortId}] answerer refused / unparseable → safe fallback`);
@@ -504,7 +521,11 @@ export class QaService {
         this.logger.log(
           `🚫 [${shortId}] not answerable from patient ${patientId}'s records (${elapsed()}ms) → fallback`,
         );
-        trace.outcome = trace.injectionDetected ? 'injection_refused' : 'not_answerable';
+        // Preserve the guard's classification (cohort_violation / injection_refused); otherwise pick
+        // from whether the answerer's own ceiling tripped.
+        if (!guardBlocked) {
+          trace.outcome = trace.injectionDetected ? 'injection_refused' : 'not_answerable';
+        }
         trace.fallbackUsed = true;
         // Carry the answerer's reasoning on the fallback too — it's the most useful audit signal here
         // ("record has no observations for blood pressure"). Empty/null is fine; the client just hides it.
