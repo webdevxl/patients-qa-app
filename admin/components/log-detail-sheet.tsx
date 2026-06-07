@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { formatDateTime, formatNumber } from "@/lib/format";
 import type { RequestLog } from "@/lib/types";
 import {
+  CategoryBadge,
   ConfidenceBadge,
   GroupBadge,
   OutcomeBadge,
@@ -97,6 +98,7 @@ export function LogDetailSheet({
                 <SeverityBadge value={log.severity} />
                 <GroupBadge value={log.group} />
                 <VariantBadge value={log.variant} />
+                {log.category && <CategoryBadge value={log.category} />}
                 {log.agent && <Mono>{log.agent}</Mono>}
               </div>
               <SheetTitle className="pr-8 text-base leading-snug">

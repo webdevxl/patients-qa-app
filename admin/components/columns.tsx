@@ -13,6 +13,7 @@ import type { RequestLog, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { formatDateTime, formatNumber } from "@/lib/format";
 import {
+  CategoryBadge,
   ConfidenceBadge,
   GroupBadge,
   OutcomeBadge,
@@ -83,6 +84,12 @@ export const columns: ColumnDef<RequestLog>[] = [
       ) : (
         <span className="text-muted-foreground">—</span>
       ),
+  },
+  {
+    accessorKey: "category",
+    header: "Eval category",
+    cell: ({ row }) => <CategoryBadge value={row.original.category} />,
+    filterFn: (row, id, value) => row.getValue(id) === value,
   },
   {
     accessorKey: "outcome",

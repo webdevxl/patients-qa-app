@@ -18,6 +18,7 @@ import {
   refsFromRetrieval,
   bump,
   type RequestTrace,
+  type EvalCategory,
 } from '../../shared/observability/request-log.service';
 import {
   FIND_PATIENT_RESOLVERS,
@@ -195,6 +196,11 @@ export class QaService {
    * @param sessionId optional conversation id (client-minted, stable per chat). Forwarded to both the
    * find and answer agent calls so their LangSmith runs carry the same `session_id` and group into one
    * thread. Purely observability — it never changes routing or output.
+   * @param category optional eval ground-truth tag — set only when this request came from an
+   * eval-dataset chip on the client (normal | prompt_injection | cross_cohort | insufficient_context),
+   * null/absent for ad-hoc questions. Recorded verbatim on the audit row so the per-category scorecard
+   * can compare what the prompt was DESIGNED to test against what the system DID. Purely observational —
+   * it never changes routing, retrieval, or output.
    * @param onToken optional token sink. Present ONLY on the streaming endpoint (`/qa/stream`): the
    * patient-scoped ANSWER path then streams its grounded prose token-by-token (cumulative answer-so-
    * far) through it. Absent (the default, e.g. `/qa/query`) → behavior is byte-identical to before,
@@ -207,6 +213,7 @@ export class QaService {
     history: ChatTurn[] = [],
     patientId?: string,
     sessionId?: string,
+    category?: EvalCategory | null,
     onToken?: TokenSink,
   ): Promise<QaResult> {
     const traceId = randomUUID();
@@ -227,6 +234,9 @@ export class QaService {
       question: trimmedQuestion,
       history: sanitizeAndTrim(history),
     });
+    // Stamp the eval ground-truth tag once, before either path branches — the ANSWER path is handed
+    // this same trace, so this single assignment covers find + answer alike.
+    trace.category = category ?? null;
 
     // ── Patient-scoped ANSWER path. When the client has a patient selected it pins it by id; we
     //    answer about THAT patient (re-verified under the cohort) instead of resolving one from

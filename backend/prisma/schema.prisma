@@ -199,6 +199,11 @@ model RequestLog {
   history           Json? // sanitized prior turns (ChatTurn[])
   resolvedPatientId String? @map("resolved_patient_id") // patient identified/answered-about, if any
   retrievalPath     String  @map("retrieval_path") // 'identity' | 'attribute' | 'none'
+  // Eval ground-truth label — what the prompt was DESIGNED to test (set only when the request came
+  // from an eval-dataset chip; null for ad-hoc questions). Distinct from `outcome` (what the system
+  // DID): together they yield per-category pass rates. normal | prompt_injection | cross_cohort |
+  // insufficient_context | null. See frontend/src/domain/promptTemplates.ts (the canonical source).
+  category          String? @map("category")
 
   // ── Retrieval + model I/O ──
   recordsRetrieved Json? @map("records_retrieved") // [{ table, id }] source-table provenance refs
@@ -246,5 +251,6 @@ model RequestLog {
   @@index([resolvedPatientId])
   @@index([outcome])
   @@index([cohortViolation])
+  @@index([category])
   @@map("request_log")
 }

@@ -13,7 +13,7 @@ import {
 } from "@tanstack/react-table";
 import { Search } from "lucide-react";
 
-import type { Outcome, RequestLog } from "@/lib/types";
+import type { EvalCategory, Outcome, RequestLog } from "@/lib/types";
 import { columns } from "./columns";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,6 +34,13 @@ const OUTCOMES: Outcome[] = [
   "cohort_violation",
   "injection_refused",
   "error",
+];
+
+const CATEGORIES: EvalCategory[] = [
+  "normal",
+  "prompt_injection",
+  "cross_cohort",
+  "insufficient_context",
 ];
 
 export function LogsTable({
@@ -70,6 +77,8 @@ export function LogsTable({
 
   const outcomeFilter =
     (table.getColumn("outcome")?.getFilterValue() as string | undefined) ?? "";
+  const categoryFilter =
+    (table.getColumn("category")?.getFilterValue() as string | undefined) ?? "";
   const filteredCount = table.getFilteredRowModel().rows.length;
 
   return (
@@ -96,6 +105,20 @@ export function LogsTable({
           {OUTCOMES.map((o) => (
             <option key={o} value={o}>
               {o}
+            </option>
+          ))}
+        </select>
+        <select
+          value={categoryFilter}
+          onChange={(e) =>
+            table.getColumn("category")?.setFilterValue(e.target.value || undefined)
+          }
+          className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm text-foreground shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        >
+          <option value="">All categories</option>
+          {CATEGORIES.map((c) => (
+            <option key={c} value={c}>
+              {c}
             </option>
           ))}
         </select>

@@ -3,15 +3,16 @@
 import * as React from "react";
 import { LogOut, RefreshCw } from "lucide-react";
 
-import { ApiError, fetchLogs, fetchMetrics } from "@/lib/api";
+import { ApiError, fetchCategoryMetrics, fetchLogs, fetchMetrics } from "@/lib/api";
 import { clearSession, type AdminSession } from "@/lib/auth";
-import type { RequestLog, VariantMetrics } from "@/lib/types";
+import type { CategoryMetrics, RequestLog, VariantMetrics } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LogsTable } from "./logs-table";
 import { LogDetailSheet } from "./log-detail-sheet";
 import { MetricsSummary } from "./metrics-summary";
+import { CategoryMetricsCard } from "./category-metrics";
 
 export function LogsView({
   session,
@@ -22,6 +23,7 @@ export function LogsView({
 }) {
   const [logs, setLogs] = React.useState<RequestLog[]>([]);
   const [metrics, setMetrics] = React.useState<VariantMetrics[]>([]);
+  const [categoryMetrics, setCategoryMetrics] = React.useState<CategoryMetrics[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [selected, setSelected] = React.useState<RequestLog | null>(null);
@@ -31,13 +33,15 @@ export function LogsView({
     setLoading(true);
     setError(null);
     try {
-      // The A/B metrics are a best-effort header — never let them block the log table.
-      const [data, metricsData] = await Promise.all([
+      // The metrics cards are a best-effort header — never let them block the log table.
+      const [data, metricsData, categoryData] = await Promise.all([
         fetchLogs(session.token, { limit: 500 }),
         fetchMetrics(session.token).catch(() => [] as VariantMetrics[]),
+        fetchCategoryMetrics(session.token).catch(() => [] as CategoryMetrics[]),
       ]);
       setLogs(data);
       setMetrics(metricsData);
+      setCategoryMetrics(categoryData);
     } catch (err) {
       // An expired/invalid token means the gate must re-authenticate.
       if (err instanceof ApiError && err.status === 401) {
@@ -104,7 +108,10 @@ export function LogsView({
         </div>
       ) : (
         <>
-          <MetricsSummary metrics={metrics} />
+          <div className="grid gap-5 lg:grid-cols-2">
+            <MetricsSummary metrics={metrics} />
+            <CategoryMetricsCard metrics={categoryMetrics} />
+          </div>
           <LogsTable data={logs} onRowClick={openLog} />
         </>
       )}

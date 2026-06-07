@@ -1,7 +1,10 @@
 import { Body, Controller, Get, Post, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { QaService, QaResult } from './qa.service';
-import { RequestLogService } from '../../shared/observability/request-log.service';
+import {
+  RequestLogService,
+  type EvalCategory,
+} from '../../shared/observability/request-log.service';
 import type { ChatTurn } from '../../agents/core/agent-base';
 import { ActiveCohort } from '../../shared/security/active-cohort.decorator';
 import { ActiveVariant } from '../../shared/security/active-variant.decorator';
@@ -32,7 +35,13 @@ export class QaController {
     @ActiveCohort() group: CohortGroup,
     @ActiveVariant() variant: AgentVariant,
     @Body()
-    body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
+    body: {
+      question: string;
+      history?: ChatTurn[];
+      patientId?: string;
+      sessionId?: string;
+      category?: EvalCategory;
+    },
   ): Promise<QaResult> {
     return this.qaService.query(
       group,
@@ -41,6 +50,7 @@ export class QaController {
       body.history,
       body.patientId,
       body.sessionId,
+      body.category,
     );
   }
 
@@ -61,7 +71,13 @@ export class QaController {
     @ActiveCohort() group: CohortGroup,
     @ActiveVariant() variant: AgentVariant,
     @Body()
-    body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
+    body: {
+      question: string;
+      history?: ChatTurn[];
+      patientId?: string;
+      sessionId?: string;
+      category?: EvalCategory;
+    },
     @Res() res: Response,
   ): Promise<void> {
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -82,6 +98,7 @@ export class QaController {
         body.history,
         body.patientId,
         body.sessionId,
+        body.category,
         (text) => send({ type: 'token', text }),
       );
       send({ type: 'result', result });
@@ -108,6 +125,7 @@ export class QaController {
     @Query('group') group?: string,
     @Query('variant') variant?: string,
     @Query('agent') agent?: string,
+    @Query('category') category?: string,
     @Query('limit') limit?: string,
   ) {
     return this.requestLog.list({
@@ -115,6 +133,7 @@ export class QaController {
       group,
       variant,
       agent,
+      category,
       cohortViolation:
         cohortViolation === undefined ? undefined : cohortViolation === 'true',
       limit: Math.min(Number(limit) || 100, 500),
@@ -130,5 +149,17 @@ export class QaController {
   @Get('metrics')
   async metrics() {
     return this.requestLog.metricsByVariant();
+  }
+
+  /**
+   * Per-category eval scorecard (task §6 "measure performance") — one row per eval category over the
+   * requests that carried a ground-truth `category` tag (i.e. were run from the eval dataset): how many
+   * the system handled correctly out of the total, plus the outcome distribution of the misses. Feeds
+   * the admin panel's category scorecard and the EXPERIMENT_RESULTS.md numbers. Behind the same guard
+   * as `/qa/logs` and `/qa/metrics`.
+   */
+  @Get('metrics/category')
+  async categoryMetrics() {
+    return this.requestLog.metricsByCategory();
   }
 }

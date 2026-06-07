@@ -20,6 +20,13 @@ export type Severity = "none" | "low" | "medium" | "high";
 
 export type Confidence = "High" | "Medium" | "Low";
 
+/** Eval ground-truth category — what the prompt was designed to test (null for ad-hoc requests). */
+export type EvalCategory =
+  | "normal"
+  | "prompt_injection"
+  | "cross_cohort"
+  | "insufficient_context";
+
 export type RetrievalPath = "identity" | "attribute" | "none";
 
 /** One prior conversation turn (sanitized server-side). */
@@ -42,6 +49,9 @@ export interface RequestLog {
   group: CohortGroup;
   variant: AgentVariant | null;
   agent: string | null;
+  // Eval ground-truth label — the category the prompt was designed to test (null for ad-hoc requests).
+  // Scored against `outcome`/flags to produce the per-category pass rates.
+  category: EvalCategory | null;
   question: string;
   history: ChatTurn[] | null;
   resolvedPatientId: string | null;
@@ -80,4 +90,15 @@ export interface VariantMetrics {
   avgOutputTokens: number | null;
   avgTotalTokens: number | null;
   avgDurationMs: number | null;
+}
+
+/** One eval category's scorecard row, as returned by `GET /qa/metrics/category`. */
+export interface CategoryMetrics {
+  category: EvalCategory;
+  total: number;
+  passed: number;
+  /** `passed / total` as a percent — null when total is 0. */
+  passRate: number | null;
+  /** Count by `outcome` within this category — shows how the misses failed. */
+  outcomes: Record<string, number>;
 }

@@ -6,6 +6,7 @@ import type {
   AgentVariant,
   CohortGroup,
   Confidence,
+  EvalCategory,
   Outcome,
   Severity,
 } from "@/lib/types";
@@ -120,6 +121,42 @@ export function GroupBadge({
       className={cn("border-transparent font-semibold", groupClass[value], className)}
     >
       {value}
+    </Badge>
+  );
+}
+
+// Eval ground-truth category. Green = normal (should succeed); red/amber/teal = the three "should be
+// refused or fall back" kinds — same hue language as the frontend eval bar.
+const categoryClass: Record<EvalCategory, string> = {
+  normal: "bg-[#34c759]/15 text-[#1f8f3d]",
+  prompt_injection: "bg-[#e06070]/15 text-[#b3344a]",
+  cross_cohort: "bg-[#ff9500]/18 text-[#a35f00]",
+  insufficient_context: "bg-[#30b0c7]/15 text-[#1d7e90]",
+};
+
+const categoryLabel: Record<EvalCategory, string> = {
+  normal: "Normal",
+  prompt_injection: "Injection",
+  cross_cohort: "Cross-cohort",
+  insufficient_context: "No-context",
+};
+
+export function CategoryBadge({
+  value,
+  className,
+}: {
+  value: EvalCategory | null;
+  className?: string;
+}) {
+  if (!value) {
+    return <span className={cn("text-muted-foreground", className)}>—</span>;
+  }
+  return (
+    <Badge
+      variant="outline"
+      className={cn("border-transparent font-medium", categoryClass[value], className)}
+    >
+      {categoryLabel[value] ?? value}
     </Badge>
   );
 }

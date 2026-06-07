@@ -1,7 +1,7 @@
 // Thin, typed HTTP client for the Nest backend — mirrors the pattern in
 // frontend/src/api/client.ts. Base URL resolves from NEXT_PUBLIC_API_URL (Next inlines
 // NEXT_PUBLIC_* at build time) and falls back to the backend's default dev port.
-import type { CohortGroup, RequestLog, VariantMetrics } from "./types";
+import type { CategoryMetrics, CohortGroup, RequestLog, VariantMetrics } from "./types";
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
@@ -44,6 +44,7 @@ export interface LogFilters {
   group?: string;
   variant?: string;
   agent?: string;
+  category?: string;
   cohortViolation?: boolean;
   limit?: number;
 }
@@ -61,6 +62,7 @@ export async function fetchLogs(
   if (filters.group) params.set("group", filters.group);
   if (filters.variant) params.set("variant", filters.variant);
   if (filters.agent) params.set("agent", filters.agent);
+  if (filters.category) params.set("category", filters.category);
   if (filters.cohortViolation !== undefined) {
     params.set("cohortViolation", String(filters.cohortViolation));
   }
@@ -103,4 +105,27 @@ export async function fetchMetrics(token: string): Promise<VariantMetrics[]> {
     throw new ApiError(`Failed to load metrics (${res.status})`, res.status);
   }
   return (await res.json()) as VariantMetrics[];
+}
+
+/**
+ * Fetch the per-category eval scorecard (`GET /qa/metrics/category`) — one row per eval category
+ * (normal / injection / cross-cohort / insufficient-context) with pass counts + rates, computed by
+ * the backend from the tagged audit rows. Drives the category scorecard card.
+ */
+export async function fetchCategoryMetrics(token: string): Promise<CategoryMetrics[]> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}/qa/metrics/category`, {
+      headers: { Authorization: `Basic ${token}` },
+    });
+  } catch {
+    throw new ApiError(`Cannot reach the backend at ${API_BASE_URL}. Is it running?`);
+  }
+  if (res.status === 401) {
+    throw new ApiError("Session expired — please sign in again.", 401);
+  }
+  if (!res.ok) {
+    throw new ApiError(`Failed to load category metrics (${res.status})`, res.status);
+  }
+  return (await res.json()) as CategoryMetrics[];
 }

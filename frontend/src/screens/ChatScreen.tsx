@@ -24,7 +24,7 @@ import { PinnedPatientCard } from '../components/PinnedPatientCard';
 import { PatientDetailModal } from '../components/PatientDetailModal';
 import { TokenUsageBar, ZERO_USAGE, type SessionUsage } from '../components/TokenUsageBar';
 import { TemplateBar } from '../components/TemplateBar';
-import type { TemplateVariant } from '../domain/promptTemplates';
+import type { EvalCategory } from '../domain/promptTemplates';
 import {
   postQaQuery,
   streamQaQuery,
@@ -116,9 +116,12 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
   const [mode, setMode] = useState<Mode>('search');
-  // Which template variant the bar shows (Safe vs Dangerous). Persists across phases; the agent set
-  // it points at follows `mode`. Defaults to the ordinary clinical questions.
-  const [templateVariant, setTemplateVariant] = useState<TemplateVariant>('safe');
+  // Which eval category the bar shows. Persists across phases; the prompt set it points at follows
+  // `mode` (find vs answer). Defaults to ordinary clinical questions.
+  const [barCategory, setBarCategory] = useState<EvalCategory>('normal');
+  // The eval ground-truth tag for the NEXT send — set when an eval chip is tapped, cleared the moment
+  // the draft is hand-edited (so only verbatim chip runs are attributed to a category). null ⇒ ad-hoc.
+  const [pendingCategory, setPendingCategory] = useState<EvalCategory | null>(null);
   // Cumulative token accounting across the session, accumulated from each response's `usage`. The
   // backend is stateless, so this running total lives here; the TokenUsageBar footer renders it.
   const [usage, setUsage] = useState<SessionUsage>(ZERO_USAGE);
@@ -307,6 +310,10 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
     const question = draft.trim();
     if (!question || pending || mode === 'choosing') return;
 
+    // The eval tag is consumed once: capture it for this request, then clear it so the next send is
+    // ad-hoc unless another chip is tapped.
+    const category = pendingCategory ?? undefined;
+
     const inPatientMode = mode === 'patient' && !!activePatient;
     append({
       id: nextId(),
@@ -316,6 +323,7 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
       ...(inPatientMode ? { patientId: activePatient!.id } : {}),
     });
     setDraft('');
+    setPendingCategory(null);
     setPending(true);
     scrollToEnd();
 
@@ -334,7 +342,7 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         scrollToEnd();
         await streamQaQuery(
           token,
-          { question, history, patientId, sessionId },
+          { question, history, patientId, sessionId, category },
           {
             onToken: (text) => {
               patchMessage(liveId!, { text });
@@ -359,7 +367,7 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         patchMessage(liveId, { streaming: false });
       } else {
         // ── FIND path: unchanged — instant structured results / candidate cards. ──
-        const result = await postQaQuery(token, { question, history, sessionId });
+        const result = await postQaQuery(token, { question, history, sessionId, category });
         accumulateUsage(result.usage);
         handleFindResult(result);
       }
@@ -505,9 +513,12 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         {mode === 'choosing' ? null : (
           <TemplateBar
             agent={mode === 'patient' ? 'answer-patient' : 'find-patient'}
-            variant={templateVariant}
-            onVariantChange={setTemplateVariant}
-            onSelect={setDraft}
+            category={barCategory}
+            onCategoryChange={setBarCategory}
+            onSelect={(text, category) => {
+              setDraft(text);
+              setPendingCategory(category);
+            }}
             accent={accent}
           />
         )}
@@ -529,7 +540,12 @@ export function ChatScreen({ group, token, onSwitchCohort }: ChatScreenProps) {
         ) : (
           <Composer
             value={draft}
-            onChangeText={setDraft}
+            // A hand edit detaches the draft from any tapped eval chip, so the send is recorded as
+            // ad-hoc rather than mis-attributed to a category.
+            onChangeText={(t) => {
+              setDraft(t);
+              setPendingCategory(null);
+            }}
             onSend={send}
             accent={accent}
             disabled={pending}

@@ -193,6 +193,13 @@ export interface QaResult {
 export type AgentName = 'find-patient' | 'answer-patient';
 
 /**
+ * Eval ground-truth category — what a prompt was DESIGNED to test. Sent only when a request came from
+ * an eval-dataset chip (see domain/promptTemplates.ts); the backend records it on `request_log` so the
+ * admin scorecard can score per-category behaviour. Mirrors the backend `EvalCategory`.
+ */
+export type EvalCategory = 'normal' | 'prompt_injection' | 'cross_cohort' | 'insufficient_context';
+
+/**
  * One prior conversation turn sent so the backend can resolve follow-up references. Assistant
  * content is the compact `contextSummary` (never a full record). The backend sanitizes/trims it.
  *
@@ -282,7 +289,13 @@ export function postSelectGroup(
  */
 export function postQaQuery(
   token: string,
-  body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
+  body: {
+    question: string;
+    history?: ChatTurn[];
+    patientId?: string;
+    sessionId?: string;
+    category?: EvalCategory;
+  },
 ): Promise<QaResult> {
   return postJson<QaResult>('/qa/query', body, token);
 }
@@ -318,7 +331,13 @@ export interface QaStreamHandlers {
  */
 export async function streamQaQuery(
   token: string,
-  body: { question: string; history?: ChatTurn[]; patientId?: string; sessionId?: string },
+  body: {
+    question: string;
+    history?: ChatTurn[];
+    patientId?: string;
+    sessionId?: string;
+    category?: EvalCategory;
+  },
   handlers: QaStreamHandlers,
 ): Promise<void> {
   let res;
