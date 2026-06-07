@@ -47,7 +47,7 @@ Four moving parts around one Postgres database:
     *that* patient's records only).
   - `GET /qa/logs`, `GET /qa/metrics`, `GET /qa/metrics/category` — observability
     and A/B / per-category evaluation.
-  - `GET /health` — DB connectivity + seeded row counts.
+  - `GET /health` — DB connectivity check.
 
   **Safety is enforced here, not in the DB:** a cohort auth guard scopes every
   read to the caller's group, and layered prompt-injection defenses (structural
@@ -110,9 +110,9 @@ start (including restoring the database):**
    ```bash
    docker compose up -d
    ```
-5. **Open the apps:**
+5. **Open the apps** (see [Opening the apps](#opening-the-apps) for details):
    - Frontend (chat): `http://<PUBLIC_HOST>/`
-   - Admin (logs/metrics): `http://<PUBLIC_HOST>:3200/`
+   - Admin (logs/metrics): `http://<PUBLIC_HOST>:3200/` — log in with `admin` / `admin`
    - Backend health: `http://<PUBLIC_HOST>:3000/health`
 
 **Start / stop afterwards:**
@@ -147,13 +147,13 @@ extension** reachable at the `DATABASE_URL` in `/.env` (the default expects port
    ```bash
    cd backend && npm install && npm run start:dev
    ```
-   Verify: `curl http://localhost:3000/health` should report `"database":"connected"`
-   with 120 patients.
+   Verify: `curl http://localhost:3000/health` should report
+   `{"status":"ok","database":"connected"}`.
 4. **Frontend** → http://localhost:8081 (press `w` for web, or `i`/`a`/scan the QR)
    ```bash
    cd frontend && npm install && npm start
    ```
-5. **Admin** → http://localhost:3200
+5. **Admin** → http://localhost:3200 (log in with `admin` / `admin`)
    ```bash
    cd admin && npm install && npm run dev
    ```
@@ -163,6 +163,41 @@ so no extra URL config is needed for local runs.
 
 **Start commands afterwards:** `npm run start:dev` (backend), `npm start`
 (frontend), `npm run dev` (admin) — each from its own directory.
+
+---
+
+## Opening the apps
+
+Once the stack is running (Docker or local), there are two apps to open in a
+browser, plus the backend health endpoint:
+
+| App | Local URL | Server URL |
+|-----|-----------|------------|
+| **Chat app** (clinician UI) | http://localhost:8081 | http://&lt;PUBLIC_HOST&gt;/ |
+| **Admin panel** (logs / metrics) | http://localhost:3200 | http://&lt;PUBLIC_HOST&gt;:3200/ |
+| Backend health | http://localhost:3000/health | http://&lt;PUBLIC_HOST&gt;:3000/health |
+
+### Open the chat app
+
+Open the **Chat app** URL above in a browser. (For native, run `npm start` in
+`frontend/` and press `w` for web, `i`/`a` for a simulator, or scan the QR with
+Expo Go.) The first screen is the cohort picker — choose **Group A** or **Group
+B** to start a session, then ask in plain language.
+
+### Open the admin panel
+
+Open the **Admin panel** URL above. You'll hit a login gate — sign in with:
+
+- **Username:** `admin`
+- **Password:** `admin`
+
+These are the defaults; override them with `NEXT_PUBLIC_ADMIN_USER` /
+`NEXT_PUBLIC_ADMIN_PASSWORD` in `/.env`. The admin panel needs the backend
+running on :3000.
+
+> ⚠️ **The admin login is a UI gate only, not real auth.** `NEXT_PUBLIC_*` values
+> are inlined into the browser bundle, so they are not secret. A real deployment
+> would gate `/qa/logs` behind a server-side admin role (see `SECURITY.md`).
 
 ---
 
