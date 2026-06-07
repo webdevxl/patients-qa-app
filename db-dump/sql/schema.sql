@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 8Ip0ZTStna5nlzfZkEVgfrFB38fN8n0fuCgRN3YMZdK02pqDJIkswuoLhnMBqGI
+\restrict lbEfadcuTYBB93KUTYXagZBiyqpkPOt55Bl1aqEgWGpSP8qUz9QtAFxPHyTywPm
 
 -- Dumped from database version 16.14 (Debian 16.14-1.pgdg12+1)
 -- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg12+1)
@@ -30,6 +30,7 @@ DROP INDEX IF EXISTS public.request_log_outcome_idx;
 DROP INDEX IF EXISTS public.request_log_group_idx;
 DROP INDEX IF EXISTS public.request_log_created_at_idx;
 DROP INDEX IF EXISTS public.request_log_cohort_violation_idx;
+DROP INDEX IF EXISTS public.request_log_category_idx;
 DROP INDEX IF EXISTS public.request_log_agent_idx;
 DROP INDEX IF EXISTS public.patient_observation_patient_id_idx;
 DROP INDEX IF EXISTS public.patient_medication_patient_id_idx;
@@ -262,7 +263,8 @@ CREATE TABLE public.request_log (
     guard_verdict text,
     answer_reasoning text,
     extraction_reasoning text,
-    variant text
+    variant text,
+    category text
 );
 
 
@@ -402,6 +404,13 @@ CREATE INDEX request_log_agent_idx ON public.request_log USING btree (agent);
 
 
 --
+-- Name: request_log_category_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX request_log_category_idx ON public.request_log USING btree (category);
+
+
+--
 -- Name: request_log_cohort_violation_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -494,5 +503,5 @@ ALTER TABLE ONLY public.patient_observation
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 8Ip0ZTStna5nlzfZkEVgfrFB38fN8n0fuCgRN3YMZdK02pqDJIkswuoLhnMBqGI
+\unrestrict lbEfadcuTYBB93KUTYXagZBiyqpkPOt55Bl1aqEgWGpSP8qUz9QtAFxPHyTywPm
 
