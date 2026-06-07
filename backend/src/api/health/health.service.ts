@@ -13,23 +13,16 @@ export class HealthService {
     };
   }
 
-  // Confirms the backend can reach Postgres and reports seeded row counts.
+  // Confirms the backend can reach Postgres. Row counts are deliberately not
+  // reported — data volume (including cohort population size) is not exposed to
+  // the client (see cohort-isolation invariant in CLAUDE.md).
   async getHealth() {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
-      const [patients, allergies, conditions, medications, observations] =
-        await Promise.all([
-          this.prisma.patient.count(),
-          this.prisma.patientAllergy.count(),
-          this.prisma.patientCondition.count(),
-          this.prisma.patientMedication.count(),
-          this.prisma.patientObservation.count(),
-        ]);
 
       return {
         status: 'ok',
         database: 'connected',
-        counts: { patients, allergies, conditions, medications, observations },
       };
     } catch (error) {
       return {

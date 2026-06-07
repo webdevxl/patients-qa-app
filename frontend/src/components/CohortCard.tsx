@@ -30,7 +30,7 @@ export function CohortCard({ meta, selected, onPress }: CohortCardProps) {
       onPress={onPress}
       accessibilityRole="radio"
       aria-checked={selected}
-      accessibilityLabel={`${meta.label}, ${meta.patients} patients`}
+      accessibilityLabel={meta.label}
       animation="quick"
       pressStyle={{ scale: 0.98 }}
       cursor="pointer"
@@ -63,12 +63,6 @@ export function CohortCard({ meta, selected, onPress }: CohortCardProps) {
         <Text fontSize={14} color={palette.secondaryLabel} letterSpacing={-0.1}>
           {meta.caption}
         </Text>
-        <XStack alignItems="center" gap={5} marginTop={2}>
-          <Ionicons name="folder-outline" size={12} color={palette.tertiaryLabel} />
-          <Text fontSize={13} color={palette.tertiaryLabel} fontWeight="500">
-            {meta.patients} patients
-          </Text>
-        </XStack>
       </YStack>
 
       {/* Selection indicator */}
